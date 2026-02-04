@@ -1,0 +1,164 @@
+#!/bin/bash
+
+# --- 0. Self-Update Logic ---
+if [ -d "$HOME/.sentinel/.git" ]; then
+    cd "$HOME/.sentinel"
+    git fetch --quiet
+    
+    LOCAL=$(git rev-parse HEAD)
+    REMOTE=$(git rev-parse @{u})
+
+    if [ "$LOCAL" != "$REMOTE" ]; then
+        echo -e "\033[0;36m\033[1m:: Update Found! Syncing with GitHub...\033[0m"
+        git pull --quiet
+        echo ":: Update applied. Restarting script..."
+        exec "$0" "$@" 
+    fi
+fi
+
+set -e
+
+# --- Configuration ---
+# Update this if your repo name differs
+REPO_URL="https://github.com/CodeFXR/Sentinel.git"
+INSTALL_DIR="$HOME/.sentinel"
+ENTRY_MODULE="sentinel.py"
+
+# --- Visual Styling ---
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# Unknown Terminal Fix
+if ! infocmp "$TERM" >/dev/null 2>&1; then
+    export TERM=xterm-256color
+fi
+
+OS="$(uname -s)"
+case "${OS}" in
+    Linux*)     OS_NAME=Linux;;
+    Darwin*)    OS_NAME=Mac;;
+    *)          OS_NAME="UNKNOWN:${OS}"
+esac
+
+# --- Header ---
+clear
+echo -e "${CYAN}${BOLD}"
+echo "     ____         __  _          __"
+echo "    / __/__ ___  / /_(_)__  ___ / /"
+echo "   _\ \/ -_) _ \/ __/ / _ \/ -_) /"
+echo "  /___/\__/_//_/\__/_/_//_/\__/_/"
+echo -e "${NC}"
+echo -e ":: Detected System: $OS_NAME"
+
+spinner() {
+    local pid=$1
+    local delay=0.1
+    local spinstr='|/-'
+    while kill -0 "$pid" 2>/dev/null; do
+        local temp=${spinstr#?}
+        printf " [%c] " "$spinstr"
+        local spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+        printf "\b\b\b\b\b\b"
+    done
+    printf " \b\b\b\b"
+}
+
+# --- 1. Check Prerequisites ---
+echo -e "${BOLD}:: Checking System...${NC}"
+
+if ! command -v git &> /dev/null; then
+    echo -e " [!] Error: Git is not installed."
+    exit 1
+fi
+
+if ! command -v python3 &> /dev/null; then
+    echo -e " [!] Error: Python 3 is not installed."
+    exit 1
+fi
+
+# Optional: Check for smart card tools
+if ! command -v pcscd &> /dev/null; then
+    echo -e " [!] Warning: 'pcscd' (Smart Card Service) not found. Functionality may be limited."
+fi
+
+echo -e " [OK] System tools ready."
+echo ""
+
+# --- 2. Download ---
+if [ ! -d "$INSTALL_DIR" ]; then
+    echo -e "${BOLD}:: Downloading Sentinel...${NC}"
+    echo -n " [>] Cloning repository..."
+    git clone --quiet --depth 1 "$REPO_URL" "$INSTALL_DIR" > /dev/null 2>&1 &
+    spinner $!
+    echo -e " Done"
+else
+    cd "$INSTALL_DIR"
+    git pull --quiet > /dev/null 2>&1
+fi
+
+cd "$INSTALL_DIR"
+
+# --- 3. Setup Virtual Env ---
+if [ ! -d ".venv" ]; then
+    echo ""
+    echo -e "${BOLD}:: Setting up Sandbox...${NC}"
+    echo -n " [>] Creating virtual environment..."
+    python3 -m venv .venv &
+    spinner $!
+    echo -e " Done"
+fi
+
+source .venv/bin/activate
+
+echo -n " [>] Syncing dependencies..."
+pip install --upgrade pip > /dev/null 2>&1
+if [ -f "requirements.txt" ]; then
+    pip install -r requirements.txt > /dev/null 2>&1 &
+    spinner $!
+    echo -e " Done"
+else
+    echo -e " [!] requirements.txt not found. Skipping."
+fi
+echo ""
+
+# --- 4. Shell Shortcuts ---
+echo -e "${BOLD}:: Finalizing...${NC}"
+
+case "$SHELL" in
+    */zsh)   SHELL_CONFIG="$HOME/.zshrc" ;;
+    */bash) 
+        if [ -f "$HOME/.bash_profile" ]; then SHELL_CONFIG="$HOME/.bash_profile"; else SHELL_CONFIG="$HOME/.bashrc"; fi 
+        ;;
+    */fish)  SHELL_CONFIG="$HOME/.config/fish/config.fish" ;;
+    *)       SHELL_CONFIG="$HOME/.profile" ;;
+esac
+
+if [ -f "$SHELL_CONFIG" ]; then
+    # Clean up old aliases
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        sed -i '' '/alias sentinel=/d' "$SHELL_CONFIG"
+        sed -i '' '/alias snl=/d' "$SHELL_CONFIG"
+    else
+        sed -i '/alias sentinel=/d' "$SHELL_CONFIG"
+        sed -i '/alias snl=/d' "$SHELL_CONFIG"
+    fi
+
+    # 1. Run in subshell so we don't change user's PWD
+    # 2. Call python directly on the script
+    CMD_STR="(cd $INSTALL_DIR && $INSTALL_DIR/.venv/bin/python $ENTRY_MODULE)"
+    
+    echo "alias sentinel="$CMD_STR"" >> "$SHELL_CONFIG"
+    echo "alias snl="$CMD_STR"" >> "$SHELL_CONFIG"
+    
+    echo -e " [OK] Aliases added to ${CYAN}$SHELL_CONFIG${NC}"
+else
+    echo -e " [!] Shell config not found. Add alias manually."
+fi
+
+echo -e "${CYAN}===================================================${NC}"
+echo -e "${BOLD} SENTINEL IS READY${NC}"
+echo -e "${CYAN}===================================================${NC}"
+echo -e "1. Restart your terminal."
+echo -e "2. Launch with: ${BOLD}${CYAN}snl${NC} or ${BOLD}${CYAN}sentinel${NC}"
