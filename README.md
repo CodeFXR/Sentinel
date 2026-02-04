@@ -26,7 +26,7 @@
 <br>
 
 <p align="center">
-<img width="800" alt="sentinel_dashboard" src="https://github.com/user-attachments/assets/placeholder-dashboard-image" />
+<img width="1366" height="768" alt="sentinel_demo" src="https://github.com/user-attachments/assets/74476b31-a976-425a-afd9-dc580489507d" />
 </p>
 
 <br>
