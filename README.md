@@ -1,18 +1,17 @@
 <div align="center">
-<img width="1408" height="768" alt="sentinel_icon" src="https://github.com/user-attachments/assets/5976361f-624b-49f4-bf73-493c74796b4d" />
-
+<img src="https://github.com/user-attachments/assets/5976361f-624b-49f4-bf73-493c74796b4d" alt="sentinel_icon" width="120" />
 
 <h1>Sentinel Identity Manager</h1>
 
 <p>
-<strong>An enterprise-grade TUI for DoD CAC/PIV management, certificate validation, and STIG compliance on Linux.</strong>
+<strong>Enterprise-grade TUI for DoD CAC/PIV management, certificate validation, and STIG compliance on Linux.</strong>
 </p>
 
 <p>
 <img src="https://img.shields.io/badge/Made%20with-Textual-orange?style=flat-square" alt="Textual" />
 <img src="https://img.shields.io/badge/Security-STIG%20Compliant-red?style=flat-square" alt="STIG" />
 <img src="https://img.shields.io/badge/Python-3.10+-blue?style=flat-square&logo=python" alt="Python" />
-<img src="https://img.shields.io/badge/OS-Linux%20(RHEL/Fedora/Ubuntu)-lightgrey?style=flat-square&logo=linux" alt="Linux" />
+<img src="https://img.shields.io/badge/OS-Linux-lightgrey?style=flat-square&logo=linux" alt="Linux" />
 </p>
 
 <p>
@@ -26,51 +25,30 @@
 <br>
 
 <p align="center">
-<img width="1366" height="768" alt="sentinel_demo" src="https://github.com/user-attachments/assets/74476b31-a976-425a-afd9-dc580489507d" />
+<img width="800" alt="sentinel_demo" src="https://github.com/user-attachments/assets/74476b31-a976-425a-afd9-dc580489507d" />
 </p>
 
 <br>
 
-Why Sentinel?
-
-Managing Smart Cards (CAC/PIV) on Linux has traditionally required a "Frankenstein" approach of CLI tools and manual configuration. Sentinel replaces complexity with a unified dashboard designed for system administrators and power users in secure environments.
-
-Automated Remediation: Real-time monitoring of pcscd and middleware with one-click fixes for service failures.
-
-The "Error 20" Fix: Advanced AIA Chasing automatically fetches missing intermediate certificates to resolve validation errors on newer DoD cards (e.g., CA-71).
-
-Hardened Security: Built-in compliance engine with 10 critical checks mapped directly to DISA RHEL 9 STIG requirements.
-
-Digital Signing: Native PDF signing via pyhanko with built-in detection for unsupported Adobe XFA forms.
-
-Zero-Touch Config: Automated trust store generation (DoD Mega Bundle) and browser integration (NSS DB/Firefox/Flatpak).
-
 Key Features
-🛠️ System Diagnostics
 
-Middleware Detection: Verifies OpenSC and PKCS#11 modules.
+Sentinel provides a unified interface for managing Smart Cards (CAC/PIV) in secure environments, replacing complex CLI workflows with automated diagnostic and configuration logic.
 
-Hardware Scanning: Real-time card reader monitoring with advanced filtering for clean logs.
+System Compliance and Diagnostics: Real-time monitoring of pcscd with auto-remediation via pkexec. Verifies OpenSC middleware and provides clean hardware scanning for card readers.
 
-Service Repair: Auto-starts pcscd via secure pkexec escalation.
+Identity Management: Robust extraction of User Principal Name (UPN) and Common Name (CN). Supports non-destructive PIN retry inspection, PIN updates, and PUK-based unblocking.
 
-🆔 Identity & PIN Management
+AIA Chasing and Certificate Validation: Automatically resolves validation errors (e.g., Error 20) by fetching missing intermediate certificates via AIA URLs, dynamically building a working chain for newer DoD certificates.
 
-Identity Mapping: Extraction of UPN/CN from hardware tokens.
+Enterprise Authentication: Automates PIV Authentication public key export for SSH and provides automated agent setup.
 
-PIN Utilities: Non-destructive status checks, secure PIN updates, and PUK-based unblocking.
+Digital Signatures: Integrated PDF signing via pyhanko and PKCS11. Includes automated detection and warnings for Adobe XFA (Dynamic) forms.
 
-🛡️ Enterprise Integration
-
-SSH Automation: Automated public key export to ~/.ssh/authorized_keys.
-
-Trust Management: Auto-generates trust stores from DoD v5.17 WCF, v5.6, and ECA sources.
-
-Browser Sync: Updates NSS databases for Chrome and Firefox (including Flatpak profiles).
+Browser Integration: One-click configuration for Chrome/Chromium NSS databases and Firefox profiles, including support for Flatpak installations.
 
 Installation
 
-Sentinel requires Python 3.10+ and standard PKCS#11 tools.
+Sentinel requires Python 3.10+ and standard PKCS#11 system tools.
 
 code
 Bash
@@ -87,42 +65,36 @@ pip install -r requirements.txt
 
 # Launch Sentinel
 python sentinel.py
-Security & Compliance
-
-Sentinel is designed for high-assurance environments:
-
-Safe Execution: All backend operations use asyncio.create_subprocess_exec to prevent shell injection.
-
-PIN Privacy: PINs are passed via environment variables or stdin; they are never logged, stored, or visible in process lists.
-
-STIG Auditing: Includes a read-only compliance engine that checks 10 critical STIG IDs (e.g., SC-LINUX-001) without altering system state unless prompted.
-
 Controls
 Context	Shortcut	Action
 Global	Ctrl + Q	Quit Application
-Global	Tab	Switch Tabs (General/Security/Tools)
+Global	Tab	Switch Tabs
 Forms	Enter	Submit / Execute Action
-Navigation	Mouse	All buttons and fields are clickable
+Navigation	Mouse	Select Fields and Buttons
+Security and Compliance
+
+Sentinel is architected for high-assurance environments with a focus on zero-privilege auditing and secure data handling.
+
+STIG Compliance: Built-in engine with 10 critical checks mapped to DISA RHEL 9 STIG requirements (e.g., SC-LINUX-001).
+
+Hardened Subprocesses: All critical backend calls utilize asyncio.create_subprocess_exec to pass arguments as lists, neutralizing shell injection vulnerabilities.
+
+Secure PIN Handling: PINs are handled exclusively via Environment Variables or stdin. They are never passed as command-line arguments and never appear in system logs or process lists.
+
+Privilege Minimalization: The application runs as a standard user, utilizing pkexec only for specific system-level repairs like starting pcscd or updating trust anchors.
+
 Architecture
 
-Frontend: Textual (Python) for a reactive, async TUI.
+Frontend: Textual (Python) for a reactive, asynchronous Terminal User Interface.
 
-Backend: AsyncIO subprocess management for non-blocking hardware interaction.
+Backend: AsyncIO for non-blocking hardware interaction and subprocess management.
 
-Validation: OpenSSL for AIA chasing and chain verification.
+Certificates: OpenSSL integration for AIA chasing and certificate chain verification.
 
-Signing: pyHanko integration for PKCS#11 digital signatures.
-
-Roadmap
-
-VPN Helper: Generate OpenVPN/StrongSwan snippets for smart card auth.
-
-YubiKey Suite: Dedicated management tab for OTP/CCID mode switching.
-
-Policy Enforcement: One-click "Lock on Card Removal" STIG enforcement.
+Signatures: pyHanko and python-pkcs11 for hardware-token digital signatures.
 
 <br>
 
 <p align="center">
-&copy; 2026 Sentinel Project. Released under the MIT License.
+&copy; CodeFXR. All rights reserved.
 </p>
