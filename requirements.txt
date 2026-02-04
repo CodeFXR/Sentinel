@@ -1,0 +1,5 @@
+textual>=0.27.0
+distro
+pyhanko
+cryptography
+python-pkcs11
