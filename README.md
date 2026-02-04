@@ -1,5 +1,5 @@
 <div align="center">
-<img width="516" height="489" alt="sentinel_icon" src="https://github.com/user-attachments/assets/ad6d18f0-05b1-40f7-8575-fc0d114ad8d1" />
+<img width="416" height="289" alt="sentinel_icon" src="https://github.com/user-attachments/assets/ad6d18f0-05b1-40f7-8575-fc0d114ad8d1" />
 
 <h1>Sentinel Identity Manager</h1>
 
