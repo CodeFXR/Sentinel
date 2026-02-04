@@ -30,7 +30,7 @@
 
 <br>
 
-Key Features
+# Key Features
 
 Sentinel provides a unified interface for managing Smart Cards (CAC/PIV) in secure environments, replacing complex CLI workflows with automated diagnostic and configuration logic.
 
@@ -46,10 +46,6 @@ Digital Signatures: Integrated PDF signing via pyhanko and PKCS11. Includes auto
 
 Browser Integration: One-click configuration for Chrome/Chromium NSS databases and Firefox profiles, including support for Flatpak installations.
 
-Installation
-
-Sentinel requires Python 3.10+ and standard PKCS#11 system tools.
-
 code
 Bash
 download
@@ -63,27 +59,16 @@ git clone https://github.com/yourusername/sentinel.git
 cd sentinel
 pip install -r requirements.txt
 
-# Launch Sentinel
-python sentinel.py
-Controls
+
+# Controls
 Context	Shortcut	Action
 Global	Ctrl + Q	Quit Application
 Global	Tab	Switch Tabs
 Forms	Enter	Submit / Execute Action
 Navigation	Mouse	Select Fields and Buttons
-Security and Compliance
 
-Sentinel is architected for high-assurance environments with a focus on zero-privilege auditing and secure data handling.
 
-STIG Compliance: Built-in engine with 10 critical checks mapped to DISA RHEL 9 STIG requirements (e.g., SC-LINUX-001).
-
-Hardened Subprocesses: All critical backend calls utilize asyncio.create_subprocess_exec to pass arguments as lists, neutralizing shell injection vulnerabilities.
-
-Secure PIN Handling: PINs are handled exclusively via Environment Variables or stdin. They are never passed as command-line arguments and never appear in system logs or process lists.
-
-Privilege Minimalization: The application runs as a standard user, utilizing pkexec only for specific system-level repairs like starting pcscd or updating trust anchors.
-
-Architecture
+# Architecture
 
 Frontend: Textual (Python) for a reactive, asynchronous Terminal User Interface.
 
