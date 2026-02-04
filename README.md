@@ -46,20 +46,6 @@ Digital Signatures: Integrated PDF signing via pyhanko and PKCS11. Includes auto
 
 Browser Integration: One-click configuration for Chrome/Chromium NSS databases and Firefox profiles, including support for Flatpak installations.
 
-code
-Bash
-download
-content_copy
-expand_less
-# Install system dependencies (RHEL/Fedora example)
-sudo dnf install opensc openssl nss-tools pcsc-lite
-
-# Clone and Install
-git clone https://github.com/yourusername/sentinel.git
-cd sentinel
-pip install -r requirements.txt
-
-
 # Controls
 Context	Shortcut	Action
 Global	Ctrl + Q	Quit Application
