@@ -149,8 +149,8 @@ if [ -f "$SHELL_CONFIG" ]; then
     # 2. Call python directly on the script
     CMD_STR="(cd $INSTALL_DIR && $INSTALL_DIR/.venv/bin/python $ENTRY_MODULE)"
     
-    echo "alias sentinel="$CMD_STR"" >> "$SHELL_CONFIG"
-    echo "alias snl="$CMD_STR"" >> "$SHELL_CONFIG"
+    echo "alias sentinel='$CMD_STR'" >> "$SHELL_CONFIG"
+    echo "alias snl='$CMD_STR'" >> "$SHELL_CONFIG"
     
     echo -e " [OK] Aliases added to ${CYAN}$SHELL_CONFIG${NC}"
 else
