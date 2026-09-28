@@ -89,9 +89,9 @@ re-add a revocation check that does not actually perform one.
 
 ## 4. The certificate bundle problem
 
-`DoD_Mega_Chain.pem` is 197 certificates, 69 unique, of which only **19 are
+`DoD_Mega_Chain.pem` is 197 certificates, 69 unique, of which only **15 are
 self-signed**. `install_certs` writes all of them into a trust-**anchor** directory,
-which means 178 intermediates and cross-certificates — including Australian Defence
+which means 54 intermediates and cross-certificates — including Australian Defence
 Organisation, Netherlands Ministry of Defence, US State Department, US Treasury, and
 several commercial SSP chains — are installed as roots.
 

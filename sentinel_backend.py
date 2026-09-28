@@ -2,6 +2,7 @@ import asyncio
 import os
 import shutil
 
+from sentinel_platform import detect, nss_databases
 from sentinel_utils import get_strategy
 
 
@@ -9,6 +10,7 @@ class SentinelBackend:
     def __init__(self, logger):
         self.logger = logger
         self.strategy = get_strategy()
+        self.platform = detect()
         self.SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
     async def check_services(self, log_writer, update_led):
@@ -57,7 +59,8 @@ class SentinelBackend:
         
         if missing:
              log_writer(f"WARNING: Missing tools: {', '.join(missing)}")
-             log_writer("Install via: dnf install pcsc-tools opensc")
+             log_writer(f"Detected platform: {self.platform.name}")
+             log_writer(f"Fix with: sudo {self.platform.install_hint()}")
              self.logger.warning(f"Dependencies: Missing {', '.join(missing)}")
         else:
              log_writer("OK: Required tools installed.")
@@ -97,45 +100,62 @@ class SentinelBackend:
         
         update_led("led-certs", "loading")
 
-        # Source file (Mega Chain: Roots + Intermediates from ALL bundles)
-        chain_file = os.path.join(self.SCRIPT_DIR, "DoD_Mega_Chain.pem")
-        if not os.path.exists(chain_file):
-            log_writer(f"ERROR: Source file not found: {chain_file}")
-            log_writer("Run create_mega_chain.py to generate it.")
+        platform = self.platform
+        target_dir = platform.trust_anchor_dir
+        refresh_cmd = platform.trust_refresh_cmd
+        if target_dir is None or not refresh_cmd:
+            log_writer(f"ERROR: {platform.name} is not a supported trust-store layout.")
+            log_writer("Sentinel will not guess a certificate directory.")
+            log_writer("Install the DoD roots manually, then see SENTINEL_DOCS.md.")
+            self.logger.error(f"Unsupported trust store layout: {platform.family}")
             update_led("led-certs", "error")
             return
 
-        target_dir = "/etc/pki/ca-trust/source/anchors/"
-        target_file = os.path.join(target_dir, "DoD_Full_Chain.pem")
-        
-        log_writer(f"Source: {os.path.basename(chain_file)}")
-        log_writer(f"Target: {target_dir}")
+        chain_file = os.path.join(self.SCRIPT_DIR, "DoD_Mega_Chain.pem")
+        if not os.path.exists(chain_file):
+            log_writer(f"ERROR: Source file not found: {chain_file}")
+            log_writer("Run tools/create_mega_chain.py to generate it.")
+            update_led("led-certs", "error")
+            return
+
+        target_file = os.path.join(target_dir, platform.trust_anchor_name)
+
+        log_writer(f"Platform:  {platform.name}")
+        log_writer(f"Source:    {os.path.basename(chain_file)}")
+        log_writer(f"Target:    {target_file}")
         log_writer("Requesting privileges via pkexec...")
 
-        try:
-            cmd = f'pkexec sh -c "cp \'{chain_file}\' \'{target_file}\' && update-ca-trust"'
-            
-            proc = await asyncio.create_subprocess_shell(
-                cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await proc.communicate()
-            
-            if proc.returncode == 0:
-                log_writer("SUCCESS: Certificates installed and trust store updated.")
-                self.logger.info("DoD Certificates installed successfully.")
-                update_led("led-certs", "success")
-            else:
+        # Two exec calls, no shell. polkit caches the authorization so this
+        # normally prompts once, not twice.
+        steps = (
+            ("pkexec", "install", "-m", "0644", chain_file, target_file),
+            ("pkexec", *refresh_cmd),
+        )
+
+        for command in steps:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                _, stderr = await proc.communicate()
+            except Exception as e:
+                log_writer(f"Execution Error: {e}")
+                self.logger.error(f"Certificate installation error: {e}")
+                update_led("led-certs", "error")
+                return
+
+            if proc.returncode != 0:
                 err_msg = stderr.decode().strip() or "Unknown error"
-                log_writer(f"FAILURE: {err_msg}")
+                log_writer(f"FAILURE: {' '.join(command)} -> {err_msg}")
                 self.logger.error(f"Certificate installation failed: {err_msg}")
                 update_led("led-certs", "error")
-                
-        except Exception as e:
-            log_writer(f"Execution Error: {str(e)}")
-            self.logger.error(f"Installation execution error: {e}")
-            update_led("led-certs", "error")
+                return
+
+        log_writer("SUCCESS: Certificates installed and trust store updated.")
+        self.logger.info("DoD Certificates installed successfully.")
+        update_led("led-certs", "success")
 
     async def configure_browsers(self, log_writer, update_led):
         log_writer("\n--- CONFIGURING BROWSERS (NSS DB) ---")
@@ -144,46 +164,30 @@ class SentinelBackend:
         update_led("led-browsers", "loading")
 
         modutil = shutil.which("modutil")
-        lib_path = "/usr/lib64/opensc-pkcs11.so"
-        
+        lib_path = self.platform.pkcs11_module
+
         if not modutil:
-            log_writer("ERROR: 'modutil' not found (install nss-tools).")
+            log_writer("ERROR: 'modutil' not found.")
+            log_writer(f"Fix with: sudo {self.platform.install_hint()}")
             update_led("led-browsers", "error")
             return
-        if not os.path.exists(lib_path):
-             log_writer(f"ERROR: Library not found at {lib_path}")
-             update_led("led-browsers", "error")
-             return
+        if not lib_path:
+            log_writer("ERROR: opensc-pkcs11.so not found on this system.")
+            log_writer(f"Fix with: sudo {self.platform.install_hint()}")
+            update_led("led-browsers", "error")
+            return
 
-        nss_paths = [os.path.expanduser("~/.pki/nssdb")]
-        
-        firefox_base = os.path.expanduser("~/.mozilla/firefox")
-        if os.path.exists(firefox_base):
-            for item in os.listdir(firefox_base):
-                if item.endswith(".default") or item.endswith(".default-release") or "default" in item:
-                    full_path = os.path.join(firefox_base, item)
-                    if os.path.isdir(full_path):
-                        nss_paths.append(full_path)
+        nss_paths = nss_databases()
+        log_writer(f"Module:  {lib_path}")
+        log_writer(f"Found {len(nss_paths)} NSS database(s) to update.")
 
-        flatpak_bases = [
-            os.path.expanduser("~/.var/app/org.mozilla.firefox/.mozilla/firefox"),
-            os.path.expanduser("~/.var/app/org.mozilla.Firefox/.mozilla/firefox")
-        ]
-        for fp_base in flatpak_bases:
-            if os.path.exists(fp_base):
-                for item in os.listdir(fp_base):
-                    if "default" in item:
-                        full_path = os.path.join(fp_base, item)
-                        if os.path.isdir(full_path):
-                            nss_paths.append(full_path)
-
-        log_writer(f"Found {len(nss_paths)} NSS databases to update.")
+        if not nss_paths:
+            log_writer("No NSS databases found. Launch a browser once, then retry.")
+            update_led("led-browsers", "error")
+            return
 
         success_count = 0
         for db_path in nss_paths:
-            if not os.path.exists(db_path):
-                continue
-            
             log_writer(f"Updating: {db_path}...")
             self.logger.info(f"Browser Config: Checking {db_path}...")
             await asyncio.sleep(0.05) 
@@ -222,5 +226,11 @@ class SentinelBackend:
             except Exception as e:
                 log_writer(f"  -> ERROR: {e}")
 
-        log_writer("Browser configuration complete. Restart browsers to apply.")
-        update_led("led-browsers", "success")
+        if success_count:
+            log_writer(f"Configured {success_count}/{len(nss_paths)} database(s).")
+            log_writer("Close and restart browsers to apply.")
+            update_led("led-browsers", "success")
+        else:
+            log_writer("FAILED: no database was configured.")
+            self.logger.error("Browser configuration: no database succeeded")
+            update_led("led-browsers", "error")

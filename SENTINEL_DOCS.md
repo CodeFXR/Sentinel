@@ -83,8 +83,9 @@ command execution. It should be two `create_subprocess_exec` calls
 invisible and `await proc.communicate()` blocks forever.
 
 **Read this before running it.** `DoD_Mega_Chain.pem` holds 197 certificates of which
-only 19 are self-signed roots. The other 178 — intermediates, cross-certificates, and
-foreign PKI material — get installed as trust anchors. See §4.
+entries covering 69 unique certificates, of which only 15 are verified self-signed roots.
+The other 54 — DoD issuing CAs, WCF intermediates, and cross-certificates — get
+installed as trust anchors. See §4.
 
 ### 2.3 `configure_browsers`
 
@@ -154,13 +155,13 @@ All 17 manifest-covered files currently verify clean.
 
 | Property | Value |
 |---|---|
-| Total certificates | 197 |
+| Total entries | 197 |
 | Unique certificates | 69 (128 are duplicates) |
-| Self-signed roots | 19 |
-| **Not self-signed** | **178** |
+| Verified self-signed roots | 15 |
+| **Not self-signed (unique)** | **54** |
 | File size | 355 KB |
 
-Only the 19 self-signed roots belong in a trust-anchor directory. The other 178 are
+Only the 15 self-signed roots belong in a trust-anchor directory. The other 54 unique ones are
 intermediates, cross-certificates, and material from the
 `DoD_Approved_External_PKIs_Trust_Chains_v11.4/` set — which includes the Australian
 Defence Organisation, the Netherlands Ministry of Defence, the US State Department and
@@ -222,7 +223,7 @@ sudo cp DoD_Mega_Chain.pem /usr/local/share/ca-certificates/
 sudo update-ca-certificates
 ```
 
-Read §3 first — you are about to install 178 non-root certificates.
+Read §3 first — you are about to install 54 non-root certificates as trust anchors.
 
 ### `No module named textual`
 

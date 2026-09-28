@@ -125,9 +125,9 @@ config aborts immediately. The tool currently detects nothing about your distrib
 beyond printing its name. This is being fixed next.
 
 **The trust store is over-populated.** `DoD_Mega_Chain.pem` contains 197
-certificates, of which only **19 are self-signed roots**. The other 178 are
-intermediates and cross-certificates, and installing them all as trust anchors
-grants far more trust than a DoD workstation needs. Rebuilding the bundle to contain
+entries covering 69 unique certificates, of which only **15 are verified self-signed
+roots**. The other 54 are intermediates and cross-certificates, and installing
+them all as trust anchors grants far more trust than a DoD workstation needs. Rebuilding the bundle to contain
 self-signed roots only is on the roadmap. Until then, know what you are installing.
 
 **The installer needs `git` and `python3` already present.** It exits with an error

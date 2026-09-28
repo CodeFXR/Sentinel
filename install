@@ -1,21 +1,5 @@
 #!/bin/bash
 
-# --- 0. Self-Update Logic ---
-if [ -d "$HOME/.sentinel/.git" ]; then
-    cd "$HOME/.sentinel"
-    git fetch --quiet
-    
-    LOCAL=$(git rev-parse HEAD)
-    REMOTE=$(git rev-parse @{u})
-
-    if [ "$LOCAL" != "$REMOTE" ]; then
-        echo -e "\033[0;36m\033[1m:: Update Found! Syncing with GitHub...\033[0m"
-        git pull --quiet
-        echo ":: Update applied. Restarting script..."
-        exec "$0" "$@" 
-    fi
-fi
-
 set -e
 
 # --- Configuration ---

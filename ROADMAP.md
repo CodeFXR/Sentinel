@@ -133,27 +133,43 @@ result from this code carries almost no information.
 ### S5 — HIGH: The mega-chain over-trusts the system trust store
 `sentinel_backend.py:111-119`, `create_mega_chain.py`
 
-`DoD_Mega_Chain.pem` (355 KB) is a blind concatenation of every `.p7b` in the tree, produced by
-`create_mega_chain.py` walking `.` and appending anything that opens. It is then written as a single
-`.pem` into the **trust anchors** directory, and `update-ca-trust` / `update-ca-certificates` ingests
-**every** certificate in that file as a root.
+`DoD_Mega_Chain.pem` is written as a single `.pem` into the **trust anchors** directory, and
+`update-ca-trust` / `update-ca-certificates` ingests **every** certificate in that file as a root.
 
-Consequences:
-- ~150 **intermediates** and cross-certificates are installed as trust anchors. Anchors must be
-  self-signed roots only.
-- The bundle includes `DoD_Approved_External_PKIs_Trust_Chains_v11.4/`, which contains foreign
-  government roots (Australian Defence Organisation, Netherlands Ministry of Defence), State Dept,
-  Treasury, and **commercial** SSP chains (DigiCert, Entrust, Verizon, IdenTrust).
+**Measured composition (197 entries, 69 unique certificates):**
+
+| | Count |
+|---|:---:|
+| Unique certificates | 69 |
+| Verified self-signed (true trust anchors) | 15 |
+| **NOT self-signed — installed as anchors anyway** | **54** |
+| Duplicate entries | 128 |
+
+> **Correction to the original review (2026-09-28):** an earlier draft of this finding claimed the
+> bundle included foreign government and commercial SSP roots (Australian Defence Organisation,
+> Netherlands Ministry of Defence, US State Department, US Treasury, DigiCert, Entrust, Verizon,
+> IdenTrust). **That was wrong.** Those `.cer` files live in
+> `DoD_Approved_External_PKIs_Trust_Chains_v11.4/`, which `create_mega_chain.py` never reads — it only
+> walks for `*.p7b`, and that directory contains no `.p7b` files. Every certificate in the bundle has
+> `O = U.S. Government`. The system trust bundle contains zero ADO/Netherlands/State/Treasury certs
+> from this source. The finding stands on the self-signed ratio, not on foreign roots.
+
+The real problem is the 54 non-self-signed certificates — DoD ID/EMAIL/SW/DERILITY issuing CAs, WCF
+intermediates, and cross-certificates — being promoted to trust anchors. A trust-anchor directory must
+contain only self-signed roots. As written, a compromised, retired, or re-keyed issuing CA that should
+be reachable only through a chain can also be treated as a root of trust, and old root generations
+(DoD Root CA 2/3/4) that have been superseded remain active.
+
+Supporting problems, all real:
 - `AGENTS.md:26` notes the `.sha256` verification files ship alongside every bundle
-  (`Certificates_PKCS7_v5.17_WCF.sha256`, etc.) and `create_mega_chain.py` **never checks a single
-  one**. The trust material is unauthenticated and unverified at build time.
-- No expiry filtering, no duplicate handling, no `openssl verify` self-check of the assembled chain.
+  (`Certificates_PKCS7_v5.17_WCF.sha256`, etc.) and `create_mega_chain.py` **never checked a single
+  one**. *Now fixed* — `tools/create_mega_chain.py` verifies all three bundles and aborts on mismatch;
+  all 17 manifest-covered files verify clean. The manifests are binary containers with the manifest
+  embedded as ASCII, and digest case is inconsistent (lowercase in the v5.12 ECA bundle, uppercase in
+  the v5.17 and v5.6 bundles), which is likely why nobody wired this up originally.
+- 128 of 197 entries are duplicates of the same 69 certificates.
+- No expiry filtering and no self-check of the assembled chain.
 
-A tool that pushes ~200 unverified certificates — including foreign government and commercial roots —
-into every workstation's system trust store is a broad trust-expansion blast radius, and the
-maintainer's own `omnissa_fedora_cert_fix.md:146` argues for the *opposite* ("Sentinel aims to
-operate in userspace… Do not attempt to rely on `update-ca-trust` or system-level modifications").
-The implementation contradicts the stated design principle.
 
 ### S6 — MEDIUM: Predictable filenames in world-writable `/tmp`
 `sentinel_backend.py:597, 606, 657, 658`
@@ -307,11 +323,12 @@ can never report its own state correctly. Every other call site in the file uses
 san_match = re.search(r"othername:UPN<([^>]+)>", cert_text)
 ```
 
-OpenSSL does not print `othername:UPN<...>`. The actual output, captured in your own `sentinel.log`, is:
+OpenSSL does not print `othername:UPN<...>`. The actual output, captured in your own `sentinel.log`
+(identity redacted), is:
 
 ```
 X509v3 Subject Alternative Name:
-    othername: 2.16.840.1.101.3.6.6:<unsupported>, othername: UPN:1402448950121004@mil, URI:urn:uuid:3E3CC495-...
+    othername: 2.16.840.1.101.3.6.6:<unsupported>, othername: UPN:<REDACTED>@mil, URI:urn:uuid:<REDACTED>
 ```
 
 The pattern expects no space and angle brackets; the real format is `othername: UPN:` followed by the
@@ -581,7 +598,7 @@ backlog below.
 | P0.6 | **Ship a real trust-store install.** Fedora: `/etc/pki/ca-trust/source/anchors/` + `update-ca-trust`. Debian/Ubuntu/Zorin: `/usr/local/share/ca-certificates/` + `update-ca-certificates`. Arch: `/etc/ca-certificates/trust/source/anchors/` + `trust extract-compat`. Use `pkexec install -m 0644` + `pkexec <refresh>` via `exec` — no `sh -c` at any level. | replaces `sentinel_backend.py:111-119` |
 | P0.7 | **Only install self-signed roots.** Verify each certificate in the bundle (`openssl verify -CAfile <self> -partial_chain <self>` per file) and refuse anything that is not self-signed. Drop the external-PKI (ADO / Netherlands / commercial SSP) directory entirely — a DoD CAC tool has no business installing Australian or Dutch government roots on a US workstation. | `create_mega_chain.py` |
 | P0.8 | **Verify the bundled trust material.** The `.sha256` files ship with every bundle and are never checked. Verify them at build time (offline) and record the verification in the release notes. | `create_mega_chain.py` |
-| P0.9 | **Add a `--dry-run` / `--json` headless mode.** A tool that installs root CAs must be scriptable and testable. Today the only way to trigger the most privileged operation in the codebase is to click a button in a TUI. | new |
+| P0.9 | **Add a `--dry-run` / `--json` headless mode.** A tool that installs root CAs must be scriptable and testable. Today the only way to trigger the most privileged operation in the codebase is to click a button in a TUI. *Elevated from P1 after an incident on 2026-09-28: a smoke test of `install_certs` invoked the real `pkexec` path and modified the host's system trust store, because there was no way to exercise the code without root. Dry-run is a correctness requirement, not a convenience.* |
 | P0.10 | **Write actual tests.** `test_sentinel.sh` is 2 lines. Minimum: a fake-distro fixture matrix (fedora / ubuntu / arch) asserting the trust-store path, refresh command, and PKCS#11 path resolve correctly; plus a test that the installer detects missing `python3-venv` and exits non-zero with a clear message. | new `tests/` |
 
 **Exit criterion:** a clean Zorin OS VM, with **no** git, python3, opensc, or pcscd preinstalled, goes
