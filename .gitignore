@@ -1,0 +1,15 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Runtime logs contain PII (cardholder names, EDIPIN, cert serials). Never commit.
+sentinel.log
+sentinel.log.*
+sentinel_scap_report.txt
+
+# Scratch
+*.tmp
+.DS_Store
