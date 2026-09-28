@@ -253,7 +253,7 @@ python-pkcs11
 `sentinel.log`, `.venv/`, `__pycache__/`
 
 `sentinel.log` is checked in and contains **67 occurrences** of a real service member's identity
-(`VAZQUEZ.JUAN.ANTONIO.1402448950`) plus DoD CA-71 certificate serial numbers and full `pkcs11-tool -O`
+(a real service member's name and EDIPIN) plus DoD CA-71 certificate serial numbers and full `pkcs11-tool -O`
 dumps. `.venv/` (with `cpython-314` bytecode) and `__pycache__/` are also in the tree. This violates
 Pipeline Hygiene Rule 5 (`AGENTS.md`) and, more seriously, publishes a service member's EDIPIN-linked
 name in a public repository. **Treat as a disclosure incident: purge from history, rotate nothing but
@@ -316,7 +316,7 @@ X509v3 Subject Alternative Name:
 
 The pattern expects no space and angle brackets; the real format is `othername: UPN:` followed by the
 value. **This match has never succeeded and never will.** The code silently falls through to the CN
-branch, which is why every log entry reads `Identity Mapped: VAZQUEZ... (CN)` — including the runs
+branch, which is why every log entry reads `Identity Mapped: <NAME>.<EDIPIN> (CN)` — including the runs
 labelled as successful validation.
 
 The user-visible consequence is serious: the sidebar shows a Common Name where the UI promises

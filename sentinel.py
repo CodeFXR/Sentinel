@@ -9,8 +9,7 @@ from logging.handlers import SysLogHandler
 
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, Center
-from textual.widgets import Button, Static, Label, Log, TabbedContent, TabPane, Input
-from textual.reactive import reactive
+from textual.widgets import Button, Static, Label, Log, TabbedContent, TabPane
 
 # Import Refactored Utils and Widgets
 from sentinel_utils import get_terminal_name, StatusLED
@@ -109,11 +108,6 @@ class SentinelApp(App):
     
     .half-btn { width: 1fr; margin-right: 1; }
     .half-btn:last-of-type { margin-right: 0; }
-    
-    /* Specific Compact Layouts */
-    .compact-row { height: auto; margin-bottom: 1; }
-    .compact-input { width: 1fr; margin-right: 1; }
-    .compact-input:last-of-type { margin-right: 0; }
     """
 
     def __init__(self):
@@ -152,11 +146,6 @@ class SentinelApp(App):
                 yield StatusLED("CAC Token Hardware", id="led-card")
                 yield StatusLED("Certificates (DoD)", id="led-certs")
                 yield StatusLED("Browser Integration", id="led-browsers")
-                yield StatusLED("STIG Compliance", id="led-stig")
-
-                yield Label("IDENTITY MAPPING", classes="sidebar-title")
-                yield StatusLED("Identity Validation", id="led-identity")
-                yield Label("User: [None]", id="label-user", classes="identity-label")
 
             with Container(id="main-panel"):
                 yield Label("Console", classes="panel-title")
@@ -167,56 +156,14 @@ class SentinelApp(App):
                             yield Button("RUN CHECKS", id="config-btn", classes="action-btn half-btn")
                             yield Button("INSTALL CERTS", id="install-certs-btn", classes="action-btn half-btn")
                         yield Button("CONFIG BROWSERS", id="browser-btn", classes="action-btn")
-                    
+
                     with TabPane("Scan"):
                         yield Log(id="scan-log")
                         yield Button("RUN", id="scan-btn", classes="action-btn")
-                    
-                    with TabPane("Cert Validation"):
-                        yield Log(id="cert-log")
-                        # Compact Layout: PIN Input next to Validate Button
-                        with Horizontal(classes="compact-row"):
-                            yield Input(placeholder="Enter CAC PIN", password=True, id="pin-input", classes="compact-input")
-                            yield Button("VALIDATE", id="cert-btn", classes="action-btn compact-input")
-                    
-                    with TabPane("SSH"):
-                        yield Log(id="ssh-log")
-                        with Horizontal(classes="btn-row"):
-                            yield Button("EXPORT PUBKEY", id="ssh-export-btn", classes="action-btn half-btn")
-                            yield Button("SETUP SSH AGENT", id="ssh-agent-btn", classes="action-btn half-btn")
-                            
-                    with TabPane("PDF Sign"):
-                        yield Log(id="pdf-log")
-                        yield Input(placeholder="Path to PDF File", id="pdf-path-input")
-                        with Horizontal(classes="compact-row"):
-                            yield Input(placeholder="CAC PIN", password=True, id="pdf-pin-input", classes="compact-input")
-                            yield Button("SIGN PDF", id="pdf-sign-btn", classes="action-btn compact-input")
-                        
-                    with TabPane("PIN Mgmt"):
-                        yield Log(id="pin-log")
-                        yield Button("CHECK STATUS", id="pin-status-btn", classes="action-btn")
-                        
-                        yield Label("Change PIN", classes="panel-title")
-                        with Horizontal(classes="compact-row"):
-                            yield Input(placeholder="Current PIN", password=True, id="pin-current", classes="compact-input")
-                            yield Input(placeholder="New PIN", password=True, id="pin-new", classes="compact-input")
-                        yield Button("CHANGE PIN", id="pin-change-btn", classes="action-btn")
-                        
-                        yield Label("Unblock PIN (Requires PUK)", classes="panel-title")
-                        with Horizontal(classes="compact-row"):
-                            yield Input(placeholder="PUK Code", password=True, id="pin-puk", classes="compact-input")
-                            yield Input(placeholder="New PIN", password=True, id="pin-unblock-new", classes="compact-input")
-                        yield Button("UNBLOCK PIN", id="pin-unblock-btn", classes="action-btn")
-
-                    with TabPane("STIG"):
-                        yield Log(id="stig-log")
-                        with Horizontal(classes="btn-row"):
-                            yield Button("RUN STIG SCAN", id="stig-run-btn", classes="action-btn half-btn")
-                            yield Button("SCAP REPORT", id="scap-btn", classes="action-btn half-btn")
 
     async def on_mount(self):
         log = self.query_one("#console")
-        log.write_line("Sentinel Identity Manager v1.0.0")
+        log.write_line("Sentinel Identity Manager v2.0.0")
         log.write_line("-" * 30)
         log.write_line(f"OS:       {distro.name(pretty=True)}")
         log.write_line(f"Kernel:   {platform.release()}")
@@ -230,47 +177,10 @@ class SentinelApp(App):
             await self.backend.check_services(self.query_one("#console").write_line, self.update_led_status)
         elif event.button.id == "scan-btn":
             await self.toggle_pcsc_scan()
-        elif event.button.id == "cert-btn":
-            pin = self.query_one("#pin-input").value
-            await self.backend.validate_cert(
-                self.query_one("#cert-log").write_line,
-                self.update_led_status,
-                lambda t: self.query_one("#label-user").update(t),
-                pin=pin
-            )
         elif event.button.id == "install-certs-btn":
             await self.backend.install_certs(self.query_one("#console").write_line, self.update_led_status)
         elif event.button.id == "browser-btn":
             await self.backend.configure_browsers(self.query_one("#console").write_line, self.update_led_status)
-            
-        # SSH Features
-        elif event.button.id == "ssh-export-btn":
-            await self.backend.export_ssh_key(self.query_one("#ssh-log").write_line)
-        elif event.button.id == "ssh-agent-btn":
-            await self.backend.setup_ssh_agent(self.query_one("#ssh-log").write_line)
-            
-        # PDF Features
-        elif event.button.id == "pdf-sign-btn":
-            path = self.query_one("#pdf-path-input").value
-            pin = self.query_one("#pdf-pin-input").value
-            await self.backend.sign_pdf(self.query_one("#pdf-log").write_line, path, pin)
-            
-        # PIN Mgmt Features
-        elif event.button.id == "pin-status-btn":
-            await self.backend.check_pin_status(self.query_one("#pin-log").write_line)
-        elif event.button.id == "pin-change-btn":
-            current = self.query_one("#pin-current").value
-            new = self.query_one("#pin-new").value
-            await self.backend.change_pin(self.query_one("#pin-log").write_line, current, new)
-        elif event.button.id == "pin-unblock-btn":
-            puk = self.query_one("#pin-puk").value
-            new = self.query_one("#pin-unblock-new").value
-            await self.backend.unblock_pin(self.query_one("#pin-log").write_line, puk, new)
-            
-        elif event.button.id == "scap-btn":
-            await self.backend.generate_scap_report(self.query_one("#console").write_line)
-        elif event.button.id == "stig-run-btn":
-            await self.backend.run_stig_scan(self.query_one("#stig-log").write_line, self.update_led_status)
 
     def update_led_status(self, led_id, status):
         self.query_one(f"#{led_id}").status = status
