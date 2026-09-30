@@ -10,6 +10,31 @@ sentinel.log
 sentinel.log.*
 sentinel_scap_report.txt
 
+# Recorded at install time: which tag or branch this checkout is pinned to, so
+# the updater can find it again. Untracked, or the updater warns about
+# uncommitted changes on every single run.
+.sentinel-ref
+
 # Scratch
 *.tmp
 .DS_Store
+
+# --- Maintenance material, kept local -----------------------------------------
+# Not needed to run the tool. The published repository carries the code, the
+# trust bundle, the installer and the vendored wheels -- everything required to
+# install and run offline. These are only needed to rebuild DoD_Roots.pem when
+# DoD publishes a new bundle, and to run the test suite.
+#
+# Kept in the working tree so `./run_tests.py` and
+# `python3 tools/create_mega_chain.py` still work locally. All of it is in the
+# git history if you ever need it published again.
+tools/
+tests/
+run_tests.py
+certificates_pkcs7_v5_12_eca/
+Certificates_PKCS7_v5_17_WCF/
+Certificates_PKCS7_v5.6_DoD/
+
+# Third-party government and commercial chains. The bundle builder never reads
+# this directory and nothing installs from it. It is reference material only.
+DoD_Approved_External_PKIs_Trust_Chains_v11.4/

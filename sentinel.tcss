@@ -1,0 +1,143 @@
+/* Sentinel TUI styles */
+
+Screen {
+    background: #000000;
+    color: #e0e0e0;
+}
+
+#sidebar {
+    width: 38;
+    dock: left;
+    background: #000000;
+    border-right: solid #222;
+    padding: 0;
+}
+
+#logo-container {
+    width: 100%;
+    height: auto;
+    margin: 0;
+    padding: 0;
+    content-align: center middle;
+}
+
+#logo {
+    width: 100%;
+    height: auto;
+    margin: 0;
+    padding: 0;
+}
+
+.sidebar-title {
+    color: #00d4ff;
+    text-style: bold;
+    margin-top: 1;
+    border-bottom: solid #222;
+    padding: 0 1;
+}
+
+StatusLED {
+    height: 1;
+    margin-top: 1;
+    padding: 0 1;
+}
+
+.identity-label {
+    color: #ffcc00;
+    margin-top: 1;
+    padding: 0 1;
+    text-style: italic;
+    height: auto;
+}
+
+#main-panel {
+    padding: 1;
+    background: #000000;
+}
+
+.panel-title {
+    color: #e0e0e0;
+    text-style: bold;
+    margin-bottom: 0;
+}
+
+.tab-hint {
+    color: #666666;
+    margin-top: 1;
+    padding: 0 1;
+}
+
+TabbedContent {
+    height: 1fr;
+    margin-top: 0;
+}
+
+Log {
+    background: #000000;
+    border: solid #222;
+    color: #00ff99;
+    height: 1fr;
+}
+
+Input {
+    height: 1;
+    margin: 0 0 1 0;
+    background: #222;
+    border: none;
+    padding: 0 1;
+}
+
+.action-btn {
+    width: 100%;
+    margin-top: 1;
+    background: #00d4ff;
+    color: black;
+    text-style: bold;
+    border: none;
+}
+
+.action-btn:hover {
+    background: #00ff00;
+}
+
+.btn-row {
+    height: auto;
+    margin-top: 1;
+}
+
+.half-btn {
+    width: 1fr;
+    margin-right: 1;
+}
+
+.half-btn:last-of-type {
+    margin-right: 0;
+}
+
+/* The one answer a non-technical user came for. */
+#verdict {
+    display: none;
+    /* Bounded: an unbounded verdict on a small terminal pushed the buttons
+       out of the viewport, so the user's next action became unreachable. */
+    height: auto;
+    max-height: 12;
+    overflow-y: auto;
+    margin-top: 1;
+    padding: 1;
+    background: #111111;
+    border: solid #333333;
+    color: #e0e0e0;
+    text-style: none;
+}
+
+.primary-btn {
+    background: #00cc66;
+    color: black;
+    text-style: bold;
+    border: none;
+    margin-bottom: 1;
+}
+
+.primary-btn:hover {
+    background: #00ff88;
+}

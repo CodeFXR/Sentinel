@@ -1,0 +1,202 @@
+#!/bin/bash
+# Sentinel uninstaller.
+#
+#   ./uninstall                 remove Sentinel and the commands, keep the certs
+#   ./uninstall --purge-certs   also remove the DoD trust anchors (needs root)
+#   ./uninstall --keep-code     keep ~/.sentinel, remove only the commands
+#   ./uninstall --dry-run       print what would happen, change nothing
+#
+# Removing the DoD roots is opt-in, because it is the one step that touches
+# system state outside your home directory and it needs root. An earlier README
+# gave uninstall instructions that named the wrong file for every distribution
+# except Fedora, which left the roots installed after a "completed" removal.
+# This script finds the real filename for your distribution, and both the old
+# name and the current one, so nothing is left behind.
+
+set -eo pipefail
+
+INSTALL_DIR="${SENTINEL_DIR:-$HOME/.sentinel}"
+BIN_DIR="$HOME/.local/bin"
+NAMES="sentinel snl sentinel-cli"
+
+PURGE_CERTS=0
+KEEP_CODE=0
+DRY_RUN=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --purge-certs) PURGE_CERTS=1 ;;
+        --keep-code)   KEEP_CODE=1 ;;
+        --dry-run)     DRY_RUN=1 ;;
+        -h|--help)     sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) printf 'Unknown option: %s\n\n' "$arg" >&2; sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    esac
+done
+
+step() { printf '\n\033[1;36m:: %s\033[0m\n' "$1"; }
+ok()   { printf '   \033[1;32mok\033[0m    %s\n' "$1"; }
+warn() { printf '   \033[1;33mwarn\033[0m  %s\n' "$1"; }
+die()  { printf '\n\033[1;31mError:\033[0m %s\n' "$1" >&2; exit 1; }
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    step "Dry run: nothing below will be changed"
+fi
+
+# Only actually delete when not in dry-run mode.
+remove() {
+    local what="$1"; shift
+    for path in "$@"; do
+        [ -e "$path" ] || [ -L "$path" ] || continue
+        if [ "$DRY_RUN" -eq 1 ]; then
+            printf '   would remove: %s\n' "$path"
+        else
+            rm -rf "$path" && ok "Removed $what: $path"
+        fi
+    done
+}
+
+# --- 1. Trust anchors (opt-in) -----------------------------------------------
+
+remove_anchor() {
+    # $1 = directory, $2 = filename
+    local path="$1/$2"
+    [ -e "$path" ] || return 0
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '   would remove trust anchor: %s\n' "$path"
+        return 0
+    fi
+    if [ "$(id -u)" -eq 0 ]; then
+        rm -f "$path" && ok "Removed trust anchor: $path"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo rm -f "$path" && ok "Removed trust anchor: $path"
+    else
+        warn "Cannot remove $path: needs root. Run: sudo rm -f $path"
+    fi
+}
+
+refresh_trust_store() {
+    local refresh="$1"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '   would refresh the trust store: %s\n' "$refresh"
+        return 0
+    fi
+    if [ "$(id -u)" -eq 0 ]; then
+        $refresh && ok "Trust store refreshed ($refresh)"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo $refresh && ok "Trust store refreshed ($refresh)"
+    else
+        warn "Cannot refresh the trust store. Run by hand: sudo $refresh"
+    fi
+}
+
+if [ "$PURGE_CERTS" -eq 1 ]; then
+    step "Removing DoD trust anchors"
+    # Ask the application where the trust store is, so the answer cannot drift
+    # from the code that installed the certificates.
+    VENV_PY="$INSTALL_DIR/.venv/bin/python"
+    if [ -x "$VENV_PY" ] && [ -f "$INSTALL_DIR/sentinel_platform.py" ]; then
+        read -r ANCHOR_DIR ANCHOR_NAME REFRESH_CMD <<EOF
+$(cd "$INSTALL_DIR" && "$VENV_PY" -c '
+import sys
+try:
+    import sentinel_platform as sp
+    p = sp.detect()
+    if p.trust_anchor_dir:
+        print(p.trust_anchor_dir, p.trust_anchor_name, " ".join(p.trust_refresh_cmd or ()))
+    else:
+        print("", "", "")
+except Exception:
+    print("", "", "")
+' 2>/dev/null)
+EOF
+        if [ -n "$ANCHOR_DIR" ]; then
+            # The current name, plus every name earlier versions used.
+            for name in "$ANCHOR_NAME" DoD_Roots.pem DoD_Roots.crt DoD_Full_Chain.pem DoD_Full_Chain.crt; do
+                [ -n "$name" ] && remove_anchor "$ANCHOR_DIR" "$name"
+            done
+            [ -n "$REFRESH_CMD" ] && refresh_trust_store "$REFRESH_CMD"
+        else
+            warn "Could not determine the trust-anchor location for this system."
+            warn "Remove any DoD_* file from your distribution's anchor directory by hand:"
+            warn "  Debian/Ubuntu:  /usr/local/share/ca-certificates/"
+            warn "  Fedora/RHEL:     /etc/pki/ca-trust/source/anchors/"
+            warn "  Arch:            /etc/ca-certificates/trust/source/anchors/"
+        fi
+    else
+        warn "No virtual environment found at $INSTALL_DIR/.venv, so the trust-anchor"
+        warn "location could not be determined. Remove any DoD_* file from your"
+        warn "distribution's anchor directory by hand; the README lists the paths."
+    fi
+    # An earlier Sentinel may have written the OpenSC workaround.
+    if [ -f /etc/opensc.conf.sentinel.bak ] && [ "$DRY_RUN" -eq 0 ]; then
+        warn "Found /etc/opensc.conf.sentinel.bak. Sentinel added a card_drivers"
+        warn "line to stop the 26-second hang on Broadcom 58200 readers. Restoring"
+        warn "the backup is optional: the line only restricts which drivers are"
+        warn "probed. To revert: sudo mv /etc/opensc.conf.sentinel.bak /etc/opensc.conf"
+    fi
+else
+    step "Leaving the DoD trust anchors installed"
+    echo "   Re-run with --purge-certs to remove them, which needs root."
+fi
+
+# --- 2. Commands on PATH -----------------------------------------------------
+
+step "Removing the sentinel commands"
+for name in $NAMES; do
+    remove "command" "$BIN_DIR/$name"
+    remove "command" "/usr/local/bin/$name"
+done
+
+# --- 3. PATH entries this installer added ------------------------------------
+
+step "Cleaning up shell configuration"
+MARKER="# Added by the Sentinel installer"
+for rc in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.config/fish/config.fish"; do
+    [ -f "$rc" ] || continue
+    if grep -qF "$MARKER" "$rc" 2>/dev/null; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            printf '   would remove the PATH line from: %s\n' "$rc"
+        else
+            # Drop the marker line and the PATH/fish_add_path line that follows it.
+            sed -i "/$(printf '%s' "$MARKER" | sed 's/[]\/$*.^[]/\\&/g')/,+1d" "$rc"
+            ok "Cleaned $rc"
+        fi
+    fi
+    # Any leftover alias from the pre-2.0 installer.
+    if grep -q 'alias sentinel=\|alias snl=' "$rc" 2>/dev/null; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            printf '   would remove old aliases from: %s\n' "$rc"
+        else
+            sed -i '/alias sentinel=/d; /alias snl=/d' "$rc"
+            ok "Removed old aliases from $rc"
+        fi
+    fi
+done
+
+# --- 4. The application and its state ----------------------------------------
+
+if [ "$KEEP_CODE" -eq 1 ]; then
+    step "Keeping the application files ($INSTALL_DIR)"
+else
+    step "Removing the application"
+    remove "directory" "$INSTALL_DIR"
+    remove "log" "$INSTALL_DIR/sentinel.log" "$HOME/.sentinel.log"
+    remove "cache" "$HOME/.cache/sentinel"
+fi
+
+# --- 5. Report ---------------------------------------------------------------
+
+printf '\n\033[1;32m==================================\033[0m\n'
+if [ "$DRY_RUN" -eq 1 ]; then
+    printf '\033[1;32m  Dry run complete. Nothing was changed.\033[0m\n'
+else
+    printf '\033[1;32m  Sentinel has been removed.\033[0m\n'
+fi
+printf '\033[1;32m==================================\033[0m\n\n'
+
+if [ "$PURGE_CERTS" -ne 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+    echo "  The DoD trust anchors are still installed. To remove them too:"
+    echo
+    echo "      ./uninstall --purge-certs"
+    echo
+fi

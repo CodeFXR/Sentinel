@@ -1,0 +1,224 @@
+#!/bin/bash
+# Sentinel updater.
+#
+#   ./update              update to the latest commit on the current branch
+#   ./update --dry-run    show what would change, touch nothing
+#   SENTINEL_REF=v2.1.0 ./update    move to a specific tag or commit
+#
+# Deliberately explicit. An earlier version of this project updated itself from
+# GitHub on every launch, before any check, which meant a compromised or
+# force-pushed repository became silent code execution on a machine holding a
+# CAC. Updating is now something you ask for.
+#
+# What it does: fetch, move to the requested ref, reinstall the Python
+# dependencies, confirm the application still imports, and tell you if the
+# system packages need attention. It never changes system packages or trust
+# anchors on its own, because those need root and a human decision.
+
+set -eo pipefail
+
+INSTALL_DIR="${SENTINEL_DIR:-$HOME/.sentinel}"
+REPO_URL="${SENTINEL_REPO:-https://github.com/CodeFXR/Sentinel.git}"
+SENTINEL_REF="${SENTINEL_REF:-}"
+DRY_RUN=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) DRY_RUN=1 ;;
+        -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) printf 'Unknown option: %s\n\n' "$arg" >&2; sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    esac
+done
+
+step() { printf '\n\033[1;36m:: %s\033[0m\n' "$1"; }
+ok()   { printf '   \033[1;32mok\033[0m    %s\n' "$1"; }
+warn() { printf '   \033[1;33mwarn\033[0m  %s\n' "$1"; }
+die()  { printf '\n\033[1;31mError:\033[0m %s\n' "$1" >&2; exit 1; }
+run()  { printf '   $ %s\n' "$*"; "$@"; }
+
+print_package_advice() {
+    step "System packages"
+    # Compare what the application thinks it needs against what is installed,
+    # and report rather than installing: these need root and a human decision.
+    VENV_PY="$INSTALL_DIR/.venv/bin/python"
+    [ -x "$VENV_PY" ] || return 0
+    MISSING="$("$VENV_PY" -c '
+import sys
+sys.path.insert(0, ".")
+try:
+    import sentinel_platform as sp
+    tools = {
+        "fedora": ["pcsc_scan", "pkcs11-tool", "opensc-tool", "modutil", "certutil"],
+        "debian": ["pcsc_scan", "pkcs11-tool", "opensc-tool", "modutil", "certutil"],
+        "arch":   ["pcsc_scan", "pkcs11-tool", "opensc-tool", "modutil", "certutil"],
+        "suse":   ["pcsc_scan", "pkcs11-tool", "opensc-tool", "modutil", "certutil"],
+    }
+    p = sp.detect()
+    missing = [t for t in tools.get(p.family, []) if not sp.have(t)]
+    print(" ".join(missing))
+except Exception:
+    print("")
+' 2>/dev/null)"
+    if [ -n "$MISSING" ]; then
+        warn "Missing: $MISSING"
+        warn "Install them with the command the application prints, or run RUN CHECKS."
+    else
+        ok "All required tools are present"
+    fi
+}
+
+[ -d "$INSTALL_DIR/.git" ] || die "No Sentinel checkout at $INSTALL_DIR.
+   If you have not installed it yet, run the install script first."
+
+cd "$INSTALL_DIR"
+
+VENV_PY="$INSTALL_DIR/.venv/bin/python"
+[ -x "$VENV_PY" ] || die "No virtual environment at $INSTALL_DIR/.venv.
+   Delete it and re-run the installer."
+
+# --- 1. Where are we now -----------------------------------------------------
+
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)"
+CURRENT_COMMIT="$(git rev-parse --short HEAD)"
+step "Current version"
+echo "   Commit:  $CURRENT_COMMIT"
+echo "   Branch:  $CURRENT_BRANCH"
+echo "   Remote:  $(git remote get-url origin 2>/dev/null || echo none)"
+
+if [ "$(git status --porcelain)" != "" ]; then
+    warn "This checkout has uncommitted changes. They will be left alone, but"
+    warn "they may conflict with the update. Stash them first if unsure."
+fi
+
+# --- 2. Fetch ---------------------------------------------------------------
+
+step "Fetching updates"
+run git fetch --tags --quiet
+ok "Fetched"
+
+# Where to update to, in order of preference:
+#   1. an explicit SENTINEL_REF from the caller
+#   2. the ref this checkout was installed from, recorded by the installer
+#   3. the remote's default branch
+#
+# Never "origin/HEAD". A pinned install leaves a detached HEAD, and
+# "origin/$CURRENT_BRANCH" then becomes "origin/HEAD", which is not a branch.
+# The updater failed outright on that, so every pinned install could never be
+# updated.
+REF_FILE="$INSTALL_DIR/.sentinel-ref"
+INSTALLED_REF=""
+if [ -f "$REF_FILE" ]; then
+    INSTALLED_REF="$(head -1 "$REF_FILE" 2>/dev/null || true)"
+fi
+
+DEFAULT_BRANCH="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || echo main)"
+DEFAULT_BRANCH="${DEFAULT_BRANCH#origin/}"
+
+if [ -n "$SENTINEL_REF" ]; then
+    TARGET_DESC="$SENTINEL_REF"
+    TARGET_SOURCE="requested on the command line"
+elif [ -n "$INSTALLED_REF" ] && [ "$INSTALLED_REF" != "HEAD" ]; then
+    TARGET_DESC="$INSTALLED_REF"
+    TARGET_SOURCE="what was installed"
+else
+    TARGET_DESC="origin/$DEFAULT_BRANCH"
+    TARGET_SOURCE="the latest release on $DEFAULT_BRANCH"
+fi
+
+if [ -n "$INSTALLED_REF" ] && [ "$INSTALLED_REF" != "HEAD" ] && [ -z "$SENTINEL_REF" ]; then
+    echo "   Tracking: $INSTALLED_REF (as installed; set SENTINEL_REF to move it)"
+fi
+
+TARGET_COMMIT="$(git rev-parse --short "$TARGET_DESC" 2>/dev/null || echo unknown)"
+if [ "$TARGET_COMMIT" = "unknown" ]; then
+    die "Cannot resolve '$TARGET_DESC'.
+   The upstream repository may have moved or the tag may have been deleted.
+   Check with:  git -C $INSTALL_DIR ls-remote --tags origin"
+fi
+
+if [ "$TARGET_COMMIT" = "$CURRENT_COMMIT" ]; then
+    ok "Already up to date at $CURRENT_COMMIT"
+    print_package_advice
+    exit 0
+fi
+
+echo "   Updating: $CURRENT_COMMIT -> $TARGET_COMMIT"
+echo "   Source:   $TARGET_DESC ($TARGET_SOURCE)"
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    echo
+    echo "   Commits you would receive:"
+    git log --oneline --no-decorate "$CURRENT_COMMIT..$TARGET_DESC" 2>/dev/null | sed 's/^/     /' || true
+    echo
+    echo "   Would then run: $VENV_PY -m pip install --upgrade <packages>"
+    print_package_advice
+    exit 0
+fi
+
+echo
+echo "   Commits you are receiving:"
+git log --oneline --no-decorate "$CURRENT_COMMIT..$TARGET_DESC" 2>/dev/null | sed 's/^/     /' || true
+echo
+
+# --- 3. Move ----------------------------------------------------------------
+
+# A merge rather than a fast-forward would be a surprising thing for an updater
+# to do on your behalf, so refuse and let a person decide.
+if ! git merge --ff-only "$TARGET_DESC"; then
+    die "Could not fast-forward to $TARGET_DESC. Your checkout has diverged.
+   Resolve it by hand:  cd $INSTALL_DIR && git log --oneline -5"
+fi
+ok "Now at $(git rev-parse --short HEAD)"
+
+# --- 4. Dependencies --------------------------------------------------------
+
+step "Reinstalling Python dependencies"
+# Read the pinned list from the application itself so the two cannot drift.
+# Falls back to the installer's copy if the module cannot be imported.
+PIP_PACKAGES="$("$VENV_PY" -c '
+import sys
+sys.path.insert(0, ".")
+try:
+    from sentinel_platform import PIP_REQUIREMENTS
+    print(" ".join(PIP_REQUIREMENTS))
+except Exception:
+    print("textual>=0.27.0,<2.0.0 distro>=1.8.0,<2.0.0")
+' 2>/dev/null)"
+
+[ -n "$PIP_PACKAGES" ] || PIP_PACKAGES="textual>=0.27.0,<2.0.0 distro>=1.8.0,<2.0.0"
+echo "   Packages: $PIP_PACKAGES"
+
+# shellcheck disable=SC2086
+run "$VENV_PY" -m pip install --quiet --upgrade $PIP_PACKAGES \
+    || die "Could not install the Python packages. Check your connection and re-run."
+ok "Python packages up to date"
+
+# --- 5. Prove it works -------------------------------------------------------
+
+step "Verifying the update"
+if ! "$VENV_PY" -c "import textual, distro, sentinel_backend, sentinel_cli, sentinel_certs"; then
+    die "The update completed but the application cannot import.
+   The new code may need a dependency this script does not know about.
+   Report it, or roll back with:  cd $INSTALL_DIR && git reset --hard $CURRENT_COMMIT"
+fi
+ok "Sentinel imports cleanly"
+
+# A changed trust bundle is the one update that can alter what your system
+# trusts, so it is called out rather than applied silently.
+if [ -f "$INSTALL_DIR/DoD_Roots.pem" ]; then
+    COUNT="$(grep -c 'BEGIN CERTIFICATE' "$INSTALL_DIR/DoD_Roots.pem" 2>/dev/null || echo 0)"
+    echo "   Trust bundle: DoD_Roots.pem ($COUNT root certificates)"
+    echo "   If this number changed, review it before pressing INSTALL CERTS:"
+    echo "       sentinel-cli install-certs --dry-run"
+fi
+
+print_package_advice
+
+printf '\n\033[1;32m==================================\033[0m\n'
+printf '\033[1;32m  Sentinel updated\033[0m\n'
+printf '\033[1;32m==================================\033[0m\n\n'
+echo "  Your installed certificates were not changed. To refresh them:"
+echo
+echo "      sentinel                    then press INSTALL CERTS, or"
+echo "      sentinel-cli install-certs --dry-run   to preview it first"
+echo

@@ -1,148 +1,419 @@
 #!/bin/bash
+# Sentinel installer.
+#
+# Installs everything Sentinel needs: system packages, the smart card service,
+# the Python environment, and the `sentinel` and `snl` commands on your PATH.
+# After a successful run you just type `sentinel` in any terminal.
+#
+# Works on Fedora/RHEL, Debian/Ubuntu (including Zorin and Mint), Arch, and
+# openSUSE.
+#
+# Honesty rules this script follows, because the previous one broke all three:
+#   * No step is backgrounded with `&` and no output is sent to /dev/null.
+#   * Every step's exit status is checked; `set -e` is not a no-op.
+#   * Success is printed only after the thing actually happened.
+#   * Nothing downloads and runs code without telling you the URL first.
 
-set -e
+set -eo pipefail
 
-# --- Configuration ---
-# Update this if your repo name differs
-REPO_URL="https://github.com/CodeFXR/Sentinel.git"
-INSTALL_DIR="$HOME/.sentinel"
-ENTRY_MODULE="sentinel.py"
+REPO_URL="${SENTINEL_REPO:-https://github.com/CodeFXR/Sentinel.git}"
+# Pin to a tag or commit for a reproducible install:  SENTINEL_REF=v2.1.0 ./install
+# Left unset, the default branch is used and the resolved commit is printed so
+# that what you ran is at least auditable after the fact.
+SENTINEL_REF="${SENTINEL_REF:-}"
+INSTALL_DIR="${SENTINEL_DIR:-$HOME/.sentinel}"
+BIN_DIR="$HOME/.local/bin"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# --- Visual Styling ---
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+# --- Package lists -----------------------------------------------------------
+# These two tables are duplicated in sentinel_platform.py so the running app can
+# print the right remediation command. tests/test_installer.py fails if they
+# drift apart, in either direction.
+#
+# BOOTSTRAP: needed before Sentinel can run at all.
+# RUNTIME:   the smart card stack Sentinel drives.
+#
+# The daemon package is not called "pcscd" anywhere you would guess: Fedora and
+# openSUSE call it pcsc-lite, Debian calls it pcscd, and Arch calls it
+# pcsclite. A wrong name makes pacman/dnf/apt refuse the entire transaction,
+# so the user gets "target not found" and installs nothing at all. All four
+# names were confirmed against real containers by tests/test_portability.py.
+#
+# These are read indirectly as ${!var} once FAMILY is known, which static
+# analysis cannot follow. Each line is marked accordingly.
 
-# Unknown Terminal Fix
-if ! infocmp "$TERM" >/dev/null 2>&1; then
-    export TERM=xterm-256color
-fi
+# shellcheck disable=SC2034
+BOOTSTRAP_fedora="git python3 python3-pip"
+# shellcheck disable=SC2034
+BOOTSTRAP_debian="git python3 python3-venv python3-pip"
+# shellcheck disable=SC2034
+BOOTSTRAP_arch="git python"
+# shellcheck disable=SC2034
+BOOTSTRAP_suse="git python3 python3-pip"
 
-OS="$(uname -s)"
-case "${OS}" in
-    Linux*)     OS_NAME=Linux;;
-    Darwin*)    OS_NAME=Mac;;
-    *)          OS_NAME="UNKNOWN:${OS}"
-esac
+# shellcheck disable=SC2034
+RUNTIME_fedora="pcsc-lite pcsc-tools opensc openssl nss-tools"
+# shellcheck disable=SC2034
+RUNTIME_debian="pcscd opensc openssl libnss3-tools pcsc-tools"
+# shellcheck disable=SC2034
+RUNTIME_arch="pcsclite opensc openssl nss pcsc-tools"
+# shellcheck disable=SC2034
+RUNTIME_suse="pcsc-lite pcsc-tools opensc openssl mozilla-nss-tools"
 
-# --- Header ---
-clear
-echo -e "${CYAN}${BOLD}"
-echo "     ____         __  _          __"
-echo "    / __/__ ___  / /_(_)__  ___ / /"
-echo "   _\ \/ -_) _ \/ __/ / _ \/ -_) /"
-echo "  /___/\__/_//_/\__/_/_//_/\__/_/"
-echo -e "${NC}"
-echo -e ":: Detected System: $OS_NAME"
+# --- Python dependencies -----------------------------------------------------
+# There is deliberately no requirements.txt. This is the single place the
+# installer reads them from, it keeps the count visible in one place, and
+# tests/test_dependencies.py fails if this list drifts from
+# sentinel_platform.PIP_REQUIREMENTS, which the application itself uses.
+# Both carry upper bounds: Textual's widget API has broken across majors, and an
+# unbounded install is not reproducible.
+PIP_PACKAGES="textual>=0.27.0,<2.0.0 distro>=1.8.0,<2.0.0"
 
-spinner() {
-    local pid=$1
-    local delay=0.1
-    local spinstr='|/-'
-    while kill -0 "$pid" 2>/dev/null; do
-        local temp=${spinstr#?}
-        printf " [%c] " "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\b\b\b\b\b\b"
-    done
-    printf " \b\b\b\b"
+# Wheels for the above are vendored in vendor/ so that installation works with
+# no access to PyPI at all. Every one is a pure-Python py3-none-any wheel, so
+# the same set works on any CPU and any Python 3.10 or newer.
+#
+# This matters because a soldier on a unit with a restricted network cannot
+# reach PyPI, and the installer failing means no tool at all. Offline is
+# therefore tried FIRST; the network is only a fallback for a checkout that
+# somehow has no vendor directory.
+VENDOR_DIR="$SCRIPT_DIR/vendor"
+
+# --- Output helpers ----------------------------------------------------------
+
+step() { printf '\n\033[1;36m:: %s\033[0m\n' "$1"; }
+ok()   { printf '   \033[1;32mok\033[0m    %s\n' "$1"; }
+warn() { printf '   \033[1;33mwarn\033[0m  %s\n' "$1"; }
+die()  { printf '\n\033[1;31mError:\033[0m %s\n' "$1" >&2; exit 1; }
+
+run() {
+    printf '   $ %s\n' "$*"
+    "$@"
 }
 
-# --- 1. Check Prerequisites ---
-echo -e "${BOLD}:: Checking System...${NC}"
+# --- Detect the system -------------------------------------------------------
+# Sets DISTRO_ID, DISTRO_NAME and FAMILY. Returns non-zero for a distribution
+# it does not recognise. OS_RELEASE_FILE exists so tests can feed it a fake one.
 
-if ! command -v git &> /dev/null; then
-    echo -e " [!] Error: Git is not installed."
-    exit 1
-fi
+detect_system() {
+    [ "$(uname -s)" = "Linux" ] || return 1
 
-if ! command -v python3 &> /dev/null; then
-    echo -e " [!] Error: Python 3 is not installed."
-    exit 1
-fi
+    local release_file="${OS_RELEASE_FILE:-/etc/os-release}"
+    [ -f "$release_file" ] || return 1
+    # shellcheck disable=SC1090
+    . "$release_file"
 
-# Optional: Check for smart card tools
-if ! command -v pcscd &> /dev/null; then
-    echo -e " [!] Warning: 'pcscd' (Smart Card Service) not found. Functionality may be limited."
-fi
+    DISTRO_ID="${ID:-unknown}"
+    DISTRO_NAME="${PRETTY_NAME:-$DISTRO_ID}"
+    FAMILY=""
 
-echo -e " [OK] System tools ready."
-echo ""
+    for candidate in $DISTRO_ID ${ID_LIKE:-}; do
+        case "$candidate" in
+            fedora|rhel|centos|rocky|almalinux|ol)                      FAMILY="fedora"; break ;;
+            debian|ubuntu|linuxmint|pop|zorin|raspbian|devuan|elementary) FAMILY="debian"; break ;;
+            arch|manjaro|endeavouros|garuda)                            FAMILY="arch";   break ;;
+            opensuse*|sles|suse)                                        FAMILY="suse";   break ;;
+        esac
+    done
 
-# --- 2. Download ---
-if [ ! -d "$INSTALL_DIR" ]; then
-    echo -e "${BOLD}:: Downloading Sentinel...${NC}"
-    echo -n " [>] Cloning repository..."
-    git clone --quiet --depth 1 "$REPO_URL" "$INSTALL_DIR" > /dev/null 2>&1 &
-    spinner $!
-    echo -e " Done"
+    [ -n "$FAMILY" ]
+}
+
+install_packages() {
+    case "$FAMILY" in
+        fedora)
+            if command -v dnf >/dev/null 2>&1; then
+                run $SUDO dnf install -y "$@"
+            else
+                run $SUDO yum install -y "$@"
+            fi
+            ;;
+        debian)
+            run $SUDO apt-get update -qq
+            run $SUDO apt-get install -y "$@"
+            ;;
+        arch)
+            run $SUDO pacman -S --needed --noconfirm "$@"
+            ;;
+        suse)
+            run $SUDO zypper install -y "$@"
+            ;;
+        *)
+            die "No package manager known for family '$FAMILY'."
+            ;;
+    esac
+}
+
+# --- The command on PATH -----------------------------------------------------
+# A real script beats a shell alias: it works in every shell, in scripts, in
+# cron, and in other programs, without the terminal being reloaded first.
+
+write_shim() {
+    local path="$1"
+    local module="${2:-sentinel.py}"
+    mkdir -p "$(dirname "$path")"
+    cat > "$path" <<SHIM
+#!/bin/sh
+# Generated by the Sentinel installer. Runs Sentinel inside its virtual environment.
+# Remove with the Sentinel uninstaller.
+cd "$INSTALL_DIR" || exit 1
+exec "$VENV_PY" $module "\$@"
+SHIM
+    chmod +x "$path"
+}
+
+# Add BIN_DIR to PATH in every shell config that exists, not just the first one.
+# A user with both .bashrc and .zshrc was previously given a .bashrc-only fix and
+# then told it did not work in zsh.
+add_to_path() {
+    local changed=0
+    local marker="# Added by the Sentinel installer"
+
+    for rc in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.zshrc" "$HOME/.profile"; do
+        [ -f "$rc" ] || continue
+        grep -qF "$BIN_DIR" "$rc" && continue
+        printf '\n%s\nexport PATH="$PATH:%s"\n' "$marker" "$BIN_DIR" >> "$rc"
+        ok "Added $BIN_DIR to $rc"
+        changed=1
+    done
+
+    # fish uses a different syntax and a different file.
+    local fishrc="$HOME/.config/fish/config.fish"
+    if [ -f "$fishrc" ] && ! grep -qF "$BIN_DIR" "$fishrc"; then
+        printf '\n%s\nfish_add_path %s\n' "$marker" "$BIN_DIR" >> "$fishrc"
+        ok "Added $BIN_DIR to $fishrc"
+        changed=1
+    fi
+
+    return 0
+}
+
+main() {
+
+# --- 1. Work out what system this is ----------------------------------------
+
+step "Checking your system"
+
+detect_system || die "Sentinel cannot work out what system this is.
+   It supports: Fedora/RHEL, Debian/Ubuntu/Zorin/Mint, Arch, openSUSE."
+
+echo "   System:  $DISTRO_NAME"
+echo "   Family:  $FAMILY"
+
+# --- 2. Root access ----------------------------------------------------------
+
+if [ "$(id -u)" -eq 0 ]; then
+    SUDO=""
+elif command -v sudo >/dev/null 2>&1; then
+    SUDO="sudo"
 else
-    cd "$INSTALL_DIR"
-    git pull --quiet > /dev/null 2>&1
+    die "Installing packages needs root. No sudo found.
+   Either run this as root, or install sudo first."
+fi
+
+# --- 3. Install system tools -------------------------------------------------
+
+bootstrap_var="BOOTSTRAP_$FAMILY"
+runtime_var="RUNTIME_$FAMILY"
+# shellcheck disable=SC2034  # read via ${!var} below
+BOOTSTRAP_PKGS="${!bootstrap_var}"
+# shellcheck disable=SC2034  # read via ${!var} below
+RUNTIME_PKGS="${!runtime_var}"
+
+step "Installing what Sentinel needs"
+echo "   Tools:   $BOOTSTRAP_PKGS"
+echo "   Cards:   $RUNTIME_PKGS"
+echo
+# shellcheck disable=SC2086
+install_packages $BOOTSTRAP_PKGS $RUNTIME_PKGS
+ok "System tools installed"
+
+# --- 4. Start the smart card service ----------------------------------------
+
+if command -v systemctl >/dev/null 2>&1; then
+    if run $SUDO systemctl enable --now pcscd; then
+        ok "pcscd service started and set to start on boot"
+    else
+        warn "Could not start pcscd. Fix later with: sudo systemctl enable --now pcscd"
+    fi
+fi
+
+# --- 5. Get the code ---------------------------------------------------------
+
+step "Downloading Sentinel"
+echo "   From: $REPO_URL${SENTINEL_REF:+ @ $SENTINEL_REF}"
+
+command -v git >/dev/null 2>&1 || die "git is still not available after install."
+
+if [ -d "$INSTALL_DIR/.git" ]; then
+    run git -C "$INSTALL_DIR" fetch --tags --quiet
+    if [ -n "$SENTINEL_REF" ]; then
+        run git -C "$INSTALL_DIR" checkout --quiet "$SENTINEL_REF"
+    else
+        run git -C "$INSTALL_DIR" pull --ff-only
+    fi
+    ok "Updated to $(git -C "$INSTALL_DIR" rev-parse --short HEAD)"
+else
+    [ -e "$INSTALL_DIR" ] && die "$INSTALL_DIR exists but is not a Sentinel checkout. Move it aside and re-run."
+    if [ -n "$SENTINEL_REF" ]; then
+        run git clone --depth 1 --branch "$SENTINEL_REF" "$REPO_URL" "$INSTALL_DIR"
+    else
+        run git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
+    fi
+    ok "Downloaded at commit $(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+fi
+
+[ -f "$INSTALL_DIR/sentinel.py" ] || die "The download is not a Sentinel checkout (no sentinel.py)."
+
+# Record what was installed, so the updater can find it again. A pinned install
+# leaves a detached HEAD, and without this the updater tries to fast-forward to
+# "origin/HEAD", which is not a branch and does not exist. It also means an
+# update can tell a user it would move them off the tag they deliberately chose.
+if [ -n "$SENTINEL_REF" ]; then
+    printf '%s\n' "$SENTINEL_REF" > "$INSTALL_DIR/.sentinel-ref"
+else
+    git -C "$INSTALL_DIR" rev-parse --abbrev-ref HEAD > "$INSTALL_DIR/.sentinel-ref" 2>/dev/null || true
 fi
 
 cd "$INSTALL_DIR"
 
-# --- 3. Setup Virtual Env ---
-if [ ! -d ".venv" ]; then
-    echo ""
-    echo -e "${BOLD}:: Setting up Sandbox...${NC}"
-    echo -n " [>] Creating virtual environment..."
-    python3 -m venv .venv &
-    spinner $!
-    echo -e " Done"
-fi
+# --- 6. Virtual environment --------------------------------------------------
 
-source .venv/bin/activate
+step "Setting up the Python environment"
 
-echo -n " [>] Syncing dependencies..."
-pip install --upgrade pip > /dev/null 2>&1
-if [ -f "requirements.txt" ]; then
-    pip install -r requirements.txt > /dev/null 2>&1 &
-    spinner $!
-    echo -e " Done"
-else
-    echo -e " [!] requirements.txt not found. Skipping."
-fi
-echo ""
+PYTHON="python3"
+command -v "$PYTHON" >/dev/null 2>&1 || PYTHON="python"
 
-# --- 4. Shell Shortcuts ---
-echo -e "${BOLD}:: Finalizing...${NC}"
-
-case "$SHELL" in
-    */zsh)   SHELL_CONFIG="$HOME/.zshrc" ;;
-    */bash) 
-        if [ -f "$HOME/.bash_profile" ]; then SHELL_CONFIG="$HOME/.bash_profile"; else SHELL_CONFIG="$HOME/.bashrc"; fi 
-        ;;
-    */fish)  SHELL_CONFIG="$HOME/.config/fish/config.fish" ;;
-    *)       SHELL_CONFIG="$HOME/.profile" ;;
-esac
-
-if [ -f "$SHELL_CONFIG" ]; then
-    # Clean up old aliases
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        sed -i '' '/alias sentinel=/d' "$SHELL_CONFIG"
-        sed -i '' '/alias snl=/d' "$SHELL_CONFIG"
-    else
-        sed -i '/alias sentinel=/d' "$SHELL_CONFIG"
-        sed -i '/alias snl=/d' "$SHELL_CONFIG"
+if [ ! -x "$INSTALL_DIR/.venv/bin/python" ]; then
+    if ! run "$PYTHON" -m venv "$INSTALL_DIR/.venv"; then
+        die "Could not create the virtual environment.
+   On Debian/Ubuntu/Zorin this means the python3-venv package is missing.
+   Install it with: sudo apt-get install python3-venv
+   Then run this installer again."
     fi
-
-    # 1. Run in subshell so we don't change user's PWD
-    # 2. Call python directly on the script
-    CMD_STR="(cd $INSTALL_DIR && $INSTALL_DIR/.venv/bin/python $ENTRY_MODULE)"
-    
-    echo "alias sentinel='$CMD_STR'" >> "$SHELL_CONFIG"
-    echo "alias snl='$CMD_STR'" >> "$SHELL_CONFIG"
-    
-    echo -e " [OK] Aliases added to ${CYAN}$SHELL_CONFIG${NC}"
+    ok "Virtual environment created"
 else
-    echo -e " [!] Shell config not found. Add alias manually."
+    ok "Virtual environment already exists"
 fi
 
-echo -e "${CYAN}===================================================${NC}"
-echo -e "${BOLD} SENTINEL IS READY${NC}"
-echo -e "${CYAN}===================================================${NC}"
-echo -e "1. Restart your terminal."
-echo -e "2. Launch with: ${BOLD}${CYAN}snl${NC} or ${BOLD}${CYAN}sentinel${NC}"
+VENV_PY="$INSTALL_DIR/.venv/bin/python"
+
+[ -x "$VENV_PY" ] || die "The virtual environment has no Python. Delete $INSTALL_DIR/.venv and re-run."
+
+# --- 7. Python packages ------------------------------------------------------
+
+step "Installing Python packages"
+echo "   Packages: $PIP_PACKAGES"
+
+# pip is optional here: on a network-restricted unit even `pip install --upgrade
+# pip` fails, and the venv's bundled pip is perfectly capable of installing from
+# a local directory.
+if [ -d "$VENDOR_DIR" ]; then
+    echo "   Source:  vendored wheels (no internet needed)"
+    if # shellcheck disable=SC2086
+       run "$VENV_PY" -m pip install --quiet --no-index \
+               --find-links "$VENDOR_DIR" $PIP_PACKAGES; then
+        ok "Installed from vendored wheels"
+    else
+        die "Could not install from the vendored wheels in $VENDOR_DIR.
+   The checkout may be incomplete. Re-clone the repository and try again."
+    fi
+else
+    warn "No vendor/ directory found, falling back to the internet."
+    warn "If this machine cannot reach PyPI, the install will fail."
+    # shellcheck disable=SC2086
+    run "$VENV_PY" -m pip install --quiet --upgrade pip \
+        || warn "Could not upgrade pip. Continuing with the bundled version."
+    # shellcheck disable=SC2086
+    run "$VENV_PY" -m pip install --quiet $PIP_PACKAGES \
+        || die "Could not install the Python packages.
+   Check your internet connection, or get a copy of the repository that
+   includes the vendor/ directory, and run this installer again."
+    ok "Installed from PyPI"
+fi
+
+# Prove the install works before claiming success. A missing module here is the
+# single most common way an installer lies.
+if ! run "$VENV_PY" -c "import textual, distro, sentinel_backend, sentinel_cli"; then
+    die "The Python packages installed but the application still cannot import.
+   This usually means a partial install. Re-run, or remove $INSTALL_DIR/.venv and try again."
+fi
+ok "Sentinel imports cleanly"
+
+# --- 8. The command, everywhere ----------------------------------------------
+
+step "Setting up the sentinel command"
+
+write_shim "$BIN_DIR/sentinel"
+write_shim "$BIN_DIR/snl"
+write_shim "$BIN_DIR/sentinel-cli" "sentinel_cli.py"
+ok "Created $BIN_DIR/sentinel, $BIN_DIR/snl and $BIN_DIR/sentinel-cli"
+
+if ! echo ":$PATH:" | grep -qF ":$BIN_DIR:"; then
+    warn "$BIN_DIR is not on your PATH. Fixing that."
+    add_to_path
+    if echo ":$PATH:" | grep -qF ":$BIN_DIR:"; then
+        ok "PATH is set for this terminal"
+    else
+        warn "This terminal still cannot find it. Run:  export PATH=\"\$PATH:$BIN_DIR\""
+    fi
+else
+    ok "$BIN_DIR is already on your PATH"
+fi
+
+# ~/.local/bin only covers this user. If /usr/local/bin is available and
+# already on PATH, also link there so the command works for root, from cron, and
+# from places where ~/.local/bin has not been set up yet. Best effort: never
+# prompt for a password here, because the user may not be present.
+if [ -d /usr/local/bin ] && echo ":$PATH:" | grep -qF ":/usr/local/bin:"; then
+    for name in sentinel snl sentinel-cli; do
+        if ln -sf "$BIN_DIR/$name" "/usr/local/bin/$name" 2>/dev/null; then
+            ok "Linked /usr/local/bin/$name (available to all users)"
+        elif [ "$(id -u)" -eq 0 ] || sudo -n true 2>/dev/null; then
+            $SUDO ln -sf "$BIN_DIR/$name" "/usr/local/bin/$name" \
+                && ok "Linked /usr/local/bin/$name (available to all users)"
+        else
+            warn "Could not link /usr/local/bin/$name. Run: sudo ln -sf $BIN_DIR/$name /usr/local/bin/$name"
+        fi
+    done
+fi
+
+# --- 9. Clean up after the old installer -------------------------------------
+
+# The old installer wrote shell aliases. They are gone now.
+for rc in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.zshrc" "$HOME/.profile"; do
+    [ -f "$rc" ] || continue
+    if grep -q 'alias sentinel=\|alias snl=' "$rc" 2>/dev/null; then
+        sed -i '/alias sentinel=/d; /alias snl=/d' "$rc"
+        ok "Removed old aliases from $rc"
+    fi
+done
+
+# --- 10. Report --------------------------------------------------------------
+
+printf '\n\033[1;32m==================================\033[0m\n'
+printf '\033[1;32m  Sentinel is ready\033[0m\n'
+printf '\033[1;32m==================================\033[0m\n\n'
+echo "  Open a new terminal, or run this once:"
+echo
+echo "      export PATH=\"\$PATH:$BIN_DIR\""
+echo
+echo "  Then:"
+echo
+printf '      \033[1;36msentinel\033[0m     the status dashboard\n'
+printf '      \033[1;36msnl\033[0m           the same thing, short\n'
+printf '      \033[1;36msentinel-cli\033[0m   headless, for scripts\n\n'
+echo "  Just set up your card in one step, and see whether it worked:"
+echo
+printf '      \033[1;36msentinel setup\033[0m\n\n'
+echo "  Not working? This says why, in plain language:"
+echo
+printf '      \033[1;36msentinel doctor\033[0m\n\n'
+}
+
+# Sourcing this file with SENTINEL_LIB_ONLY=1 defines the functions without
+# running anything. That is how the tests reach detect_system and the package
+# tables without installing a single package.
+if [ "${SENTINEL_LIB_ONLY:-0}" != "1" ]; then
+    main "$@"
+fi
