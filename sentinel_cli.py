@@ -35,7 +35,7 @@ import sentinel_setup
 from sentinel_backend import Event, Outcome, SentinelBackend
 from sentinel_platform import PIP_REQUIREMENTS, TRUST_ANCHOR_NAME
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 # Order matters: check the reader before configuring anything, fix the reader
 # hang before anything touches a card, and configure browsers after the roots

@@ -17,7 +17,7 @@
 set -eo pipefail
 
 REPO_URL="${SENTINEL_REPO:-https://github.com/CodeFXR/Sentinel.git}"
-# Pin to a tag or commit for a reproducible install:  SENTINEL_REF=v2.1.0 ./install
+# Pin to a tag or commit for a reproducible install:  SENTINEL_REF=v2.2.0 ./install
 # Left unset, the default branch is used and the resolved commit is printed so
 # that what you ran is at least auditable after the fact.
 SENTINEL_REF="${SENTINEL_REF:-}"

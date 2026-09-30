@@ -74,7 +74,7 @@ The installer detects your distribution, installs what Sentinel needs, and puts 
 <summary>Prefer a specific version?</summary>
 
 ```bash
-SENTINEL_REF=v2.1.0 ./install
+SENTINEL_REF=v2.2.0 ./install
 ```
 
 Pins the install to a tag, so it is reproducible.

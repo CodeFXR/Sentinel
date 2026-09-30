@@ -3,7 +3,7 @@
 #
 #   ./update              update to the latest commit on the current branch
 #   ./update --dry-run    show what would change, touch nothing
-#   SENTINEL_REF=v2.1.0 ./update    move to a specific tag or commit
+#   SENTINEL_REF=v2.2.0 ./update    move to a specific tag or commit
 #
 # Deliberately explicit. An earlier version of this project updated itself from
 # GitHub on every launch, before any check, which meant a compromised or

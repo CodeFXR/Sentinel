@@ -31,7 +31,7 @@ from sentinel_platform import browsers_running
 from sentinel_platform import TRUST_ANCHOR_NAME
 from sentinel_utils import StatusLED, get_terminal_name
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Hoisted out of the per-line loop: recompiling this for every line of
