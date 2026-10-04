@@ -49,6 +49,8 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
+import sentinel_platform
+
 # How long a packaging query may take. These are local commands, but a wedged
 # Flatpak daemon can block, and a hung tool on a laptop is worse than a
 # missing answer.
@@ -195,9 +197,18 @@ def _firefox_profiles() -> dict[str, list[str]]:
 
 
 def chromium_databases() -> list[str]:
-    """Chromium and Electron share ~/.pki/nssdb."""
+    """Chromium and Electron share ~/.pki/nssdb.
+
+    Reported when a Chromium-family browser is installed, even if the directory
+    does not exist yet: a browser that has been installed but never launched has
+    no database, and that is a state Sentinel can create rather than a reason to
+    report the browser as absent. Gated on the browser actually being installed
+    so that a machine without Chromium is not told it has an unconfigured one.
+    """
+    if not sentinel_platform.chromium_installed():
+        return []
     path = os.path.join(os.path.expanduser("~"), ".pki", "nssdb")
-    return [path] if os.path.isdir(path) else []
+    return [path]
 
 
 def inventory() -> list[Browser]:

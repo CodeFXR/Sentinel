@@ -22,7 +22,9 @@ from logging.handlers import RotatingFileHandler
 
 import distro
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Center, Container, Horizontal, Vertical
+from textual.screen import ModalScreen
 from textual.widgets import Button, Label, Log, Static, TabbedContent, TabPane
 
 import sentinel_setup
@@ -48,6 +50,74 @@ LOGO_ASCII = r"""
     / __/__ ___  / /_(_)__  ___ / /
    _\ \/ -_) _ \/ __/ / _ \/ -_) /
   /___/\__/_//_/\__/_/_//_/\__/_/"""
+
+
+class CardPromptScreen(ModalScreen[bool]):
+    """A modal that asks the user to insert their CAC.
+
+    Dismisses on either key or button, and reports which, so the caller can tell
+    "acknowledged, I will insert it" from "closed without reading it". Kept to
+    one short question because it interrupts a running operation: anything
+    longer belongs in the console, which is still being written to underneath.
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss(False)", "Close"),
+        Binding("enter", "dismiss(True)", "I inserted it"),
+    ]
+
+    DEFAULT_CSS = """
+    CardPromptScreen {
+        align: center middle;
+        background: #000000 70%;
+    }
+    #card-prompt-box {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        background: #111111;
+        border: thick #ffcc00;
+    }
+    #card-prompt-title {
+        color: #ffcc00;
+        text-style: bold;
+        width: 100%;
+        margin-bottom: 1;
+    }
+    #card-prompt-detail {
+        color: #e0e0e0;
+        width: 100%;
+        height: auto;
+        margin-bottom: 1;
+    }
+    #card-prompt-btn {
+        width: 100%;
+        background: #ffcc00;
+        color: black;
+        text-style: bold;
+        border: none;
+    }
+    """
+
+    def __init__(self, detail: str):
+        super().__init__()
+        self.detail = detail or "No card was detected in the reader."
+
+    def compose(self) -> ComposeResult:
+        with Center():
+            with Vertical(id="card-prompt-box"):
+                yield Label("INSERT YOUR CAC", id="card-prompt-title")
+                yield Static(
+                    f"{self.detail}\n\n"
+                    "Put your Common Access Card in the reader, then run "
+                    "CONFIG BROWSERS again. Everything else is already set up.",
+                    id="card-prompt-detail",
+                )
+                yield Button("I INSERTED IT  [enter]", id="card-prompt-btn")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "card-prompt-btn":
+            self.dismiss(True)
 
 
 class SentinelApp(App):
@@ -163,6 +233,32 @@ class SentinelApp(App):
             self.write(event.payload)
         elif event.kind == "led":
             self.set_led(event.payload, event.status)
+        elif event.kind == "card-prompt":
+            self.prompt_for_card(event.payload)
+
+    def prompt_for_card(self, detail: str) -> None:
+        """Ask the user to insert their CAC, in a window they cannot miss.
+
+        This is the one condition where the tool genuinely cannot proceed on the
+        user's behalf: a card that is not in the reader cannot be shown working.
+        A line in the console is easy to scroll past while the LED sits red, and
+        the natural conclusion is that the tool is broken. So it gets a modal,
+        which is also the only reliable way to interrupt a running operation in
+        Textual without cancelling it.
+
+        The popup carries the reason as well as the request, because "no reader"
+        and "no card" need different fixes and the user should not have to work
+        out which one applies.
+        """
+        try:
+            self.push_screen(CardPromptScreen(detail), self._on_card_prompt_closed)
+        except Exception as exc:  # a popup must never take the app down
+            self.logger.error(f"could not show the card prompt: {exc}")
+            self.write("Insert your CAC into the reader, then run CONFIG BROWSERS again.")
+
+    def _on_card_prompt_closed(self, retry: bool | None) -> None:
+        if retry:
+            self.write("Insert your CAC, then press b to run CONFIG BROWSERS again.")
 
     def set_led(self, led_id: str, status: str) -> None:
         try:
