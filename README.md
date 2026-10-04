@@ -115,8 +115,21 @@ For scripting, and for reviewing a change before you make it.
 sentinel-cli check --dry-run        # show what would change, change nothing
 sentinel-cli install-certs          # install the DoD roots (asks your password)
 sentinel-cli verify-bundle          # check the shipped roots against the manifest
+sentinel-cli doctor-browser         # will this browser actually offer my card?
 sentinel-cli all --json             # machine-readable, for a pipeline
 ```
+
+`doctor-browser` is the one to run when setup reports success and the browser
+still does nothing. It answers that question by name rather than with a light:
+
+1. is the card readable by the host,
+2. is the browser sandboxed — a snap or Flatpak build cannot see the host's
+   p11-kit or its `pcscd`, whatever the host can see,
+3. does the browser have a profile — one that has never been started has none,
+   and was never configured,
+4. is Firefox set to *ask* which certificate to use, or is it picking one itself.
+
+Read-only: no writes, no privileges, no network.
 
 `--dry-run` never claims success it did not achieve.
 
@@ -223,6 +236,7 @@ The uninstaller asks the application where your trust store is, so it removes th
 
 ## Honest limitations
 
+- **`doctor-browser` checks four preconditions, not the whole chain.** It can say the card is readable, the browser is not sandboxed, a profile exists and Firefox will ask for a certificate. It cannot prove a given CAC site accepts a given certificate, because that depends on the site's own policy. "Everything checks out" is a statement about the machine, not about every site behind it.
 - **The browser step is verified on two real machines, not one.** Fedora 44 with a Broadcom Corp 58200, and Zorin OS 18.1 with Chromium only. On the Zorin laptop the first run of the p11-kit check reported a working configuration as broken, because it demanded a `p11-kit-proxy` entry in `~/.pki/nssdb` that Chromium never writes; the field log is the fixture `tests/test_zorin_report.py` asserts against. Distribution support is verified in real containers as well, but a container has no smart card, so a container proves the packaging and not the card.
 - **`systemctl is-enabled` reports `indirect` on most machines, and that is not a fault.** pcscd is normally pulled in by `pcscd.socket` and a D-Bus unit. Comparing that against the literal string `enabled` sends a user to fix a service that starts at every boot, so the check accepts every state that means "comes up on its own".
 - **The certificates have not been read on the machines they are installed from the network path.** The sources in this repository are unmodified from DoD's signed publication and the bundle reproduces byte-for-byte from them, but if DoD publishes a new bundle version, `tools/refresh_roots.py --check` will say so rather than anyone noticing.
