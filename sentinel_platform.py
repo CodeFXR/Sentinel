@@ -224,6 +224,28 @@ def have(binary: str) -> bool:
     return shutil.which(binary) is not None
 
 
+async def _systemctl_state(verb: str, service: str, timeout: float) -> str:
+    """Run `systemctl <verb> <service>` and return its trimmed stdout.
+
+    Returns "" on any failure -- systemctl absent, wedged, or timing out. The
+    caller decides what an unknown state means, because "cannot answer" and
+    "reports no" are different and only the caller knows which one it is safe to
+    treat as the other.
+    """
+    if not have("systemctl"):
+        return ""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "systemctl", verb, service,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except (asyncio.TimeoutError, OSError):
+        return ""
+    return stdout.decode(errors="replace").strip()
+
+
 async def service_is_active(service: str = "pcscd", timeout: float = 5.0) -> bool:
     """Ask systemd whether a unit is active, without blocking the event loop.
 
@@ -232,18 +254,46 @@ async def service_is_active(service: str = "pcscd", timeout: float = 5.0) -> boo
     that is down, and the caller reports that as "unknown" rather than
     "broken".
     """
-    if not have("systemctl"):
+    return await _systemctl_state("is-active", service, timeout) == "active"
+
+
+async def service_is_enabled(service: str = "pcscd", timeout: float = 5.0) -> bool:
+    """True when the unit will come up on its own at boot.
+
+    Not the same question as `service_is_active`, and the answer is not a plain
+    string comparison. `systemctl is-enabled` reports one of several states, and
+    only some of them mean the service is broken:
+
+    ==================  ==========================================================
+    ``enabled``         started at boot because it was asked to
+    ``enabled-runtime`` started at boot, but the setting does not persist
+    ``indirect``        started at boot because another unit requires it
+    ``static``          no [Install] section; started only if something wants it
+    ``disabled``        will not start on its own
+    ==================  ==========================================================
+
+    ``indirect`` is the one that matters here. pcscd is normally pulled in by
+    ``pcscd.socket`` and a D-Bus activation unit, and on a machine configured
+    that way -- which is most of them -- systemd reports ``indirect`` while the
+    service starts perfectly at every boot.
+
+    Comparing against the literal string ``enabled`` therefore classifies a
+    working machine as unconfigured. That is the same failure as the browser
+    check in #1: a test that asks a question the system does not answer the way
+    the test assumed, and reports the discrepancy as a fault in the user's setup.
+
+    ``static`` is treated as "will start", because for a socket-activated daemon
+    it means the same thing in practice. It is the one value here that is a
+    judgement rather than a reading, and it is the safe direction: reporting a
+    false "already good" costs nothing, while a false "not enabled" sends the
+    user to fix something that is not broken.
+    """
+    state = await _systemctl_state("is-enabled", service, timeout)
+    if state == "":
+        # systemctl could not answer. Not the same as "no", and guessing here
+        # would either nag about a healthy service or skip a broken one.
         return False
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "systemctl", "is-active", service,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except (asyncio.TimeoutError, OSError):
-        return False
-    return stdout.decode(errors="replace").strip() == "active"
+    return state in ("enabled", "enabled-runtime", "indirect", "static")
 
 
 def opensc_conf_path() -> str:
