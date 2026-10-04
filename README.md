@@ -186,9 +186,27 @@ python3 tools/refresh_roots.py --check             # does the bundle match them?
 python3 tools/refresh_roots.py --write             # rebuild both files
 ```
 
-`--verify-sources` checks every source file against the SHA-256 manifest that
-DoD ships inside each bundle's `.sha256` file — which despite its name is a CMS
-object signed by a DoD PKE code-signing credential, not a checksum list.
+`--verify-sources` checks every source file against `DoD_Roots.sources.sha256`,
+which is pinned in git, and then cross-checks DoD's own signed manifests against
+it. The two-step is deliberate, and it came out of a review finding.
+
+Each bundle's `.sha256` is not a checksum list despite the name: it is a CMS
+SignedData object whose payload is a digest list, signed by a DoD PKE
+code-signing credential chaining to DoD Root CA 3. A current OpenSSL **cannot
+validate that signature** — the legacy digest field advertises SHA-1, which
+OpenSSL 3 refuses, and the signing certificate has since expired — yet it still
+writes the payload. So the digests can be read but not authenticated: editing
+one byte of a copied signature file changes the list it yields, and openssl
+returns the same exit code either way. Hashing the files against that payload
+alone means trusting a file an attacker can edit.
+
+Pinning the digests in git makes the chain reviewable — a change is a commit
+rather than a silent edit — and the cross-check means a payload that disagrees
+with the repository is a hard failure rather than a pass.
+
+```bash
+python3 tools/refresh_roots.py --write-sources   # regenerate the pinned digests
+```
 
 <br>
 
