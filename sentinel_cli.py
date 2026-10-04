@@ -151,9 +151,29 @@ async def run_setup(backend: SentinelBackend, dry_run: bool) -> tuple[list, sent
     return ordered, verdict
 
 
+_PROMPTED = False
+
+
 def _print(event: Event) -> None:
+    """Render a backend event on stdout.
+
+    `card-prompt` is the headless equivalent of the TUI's modal. It has to be
+    surfaced rather than dropped: the backend emits it when no CAC is in the
+    reader, and a headless run that swallowed it would report a failure with no
+    stated cause. Printed once per run, because the backend reports it for every
+    operation that needs a card.
+    """
+    global _PROMPTED
     if event.kind == "log":
         print(event.payload)
+    elif event.kind == "card-prompt" and not _PROMPTED:
+        _PROMPTED = True
+        print()
+        print("  " + "*" * 56)
+        print(f"  ACTION NEEDED: {event.payload}.")
+        print("  Put your CAC in the reader, then run this command again.")
+        print("  " + "*" * 56)
+        print()
 
 
 def main(argv: list[str] | None = None) -> int:

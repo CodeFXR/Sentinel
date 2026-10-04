@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 
 from dataclasses import dataclass, field
@@ -47,6 +48,11 @@ PROBE_TIMEOUT = 15.0
 NSS_TIMEOUT = 10.0
 
 MODULE_NAME = "DoD CAC"
+
+# The name p11-kit registers itself under in an NSS database. Not the same as
+# the library filename: NSS stores the module as "p11-kit-proxy" and the file it
+# loads as "p11-kit-proxy.so", and only the former is the module's identity.
+P11_KIT_MODULE_NAME = "p11-kit-proxy"
 
 
 @dataclass
@@ -96,10 +102,20 @@ async def run(
     124 with the reason in stderr, so callers have one error path instead of
     two. The child is killed and reaped on timeout so it cannot outlive the
     call.
+
+    stdin is /dev/null, and that is load-bearing rather than tidiness.
+    `modutil -add` is interactive: it prints "Type 'q' to abort, or <enter> to
+    continue" and then blocks on a read. Inheriting the terminal made Sentinel
+    appear to hang at "Updating: ..." waiting for a keystroke the user has no
+    reason to know about, with no prompt visible in the console the tool is
+    printing to. modutil reads EOF as "continue" and does the work, so closing
+    stdin is both safe and the difference between a tool that runs unattended
+    and one that appears broken.
     """
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -363,11 +379,23 @@ class SentinelBackend:
         )
 
     async def configure_browsers(self, emit: Emit, dry_run: bool = False) -> Outcome:
-        """Register the OpenSC PKCS#11 module in every NSS database the user has.
+        """Get every NSS database the user has ready to use a CAC.
 
-        Also imports the DoD roots into each database. Registering a module
-        without importing certificates leaves the device present in Firefox with
-        nothing usable in it, which reads as "the tool did not work".
+        Two jobs, and which one applies depends on the machine:
+
+        1. Make the DoD roots trusted. Always done, on every database. This is
+           the part the browser genuinely needs from Sentinel.
+        2. Make the card reachable. Usually a no-op, because p11-kit already
+           brokers OpenSC into the browser through `p11-kit-proxy.so`. Only on a
+           machine without p11-kit does this mean writing a PKCS#11 module
+           entry by hand with modutil.
+
+        Getting (2) wrong is what made this step report failure on working
+        machines. See the p11-kit note in sentinel_platform for the full
+        mechanism; the short version is that a manual `modutil -add` of
+        opensc-pkcs11.so duplicates what p11-kit has already registered, NSS
+        refuses the duplicate, and the browser -- which was never broken -- gets
+        reported as unconfigured.
         """
         log = lambda text: emit(Event("log", text))
         log("\n--- CONFIGURING BROWSERS (NSS DB) ---")
@@ -378,19 +406,10 @@ class SentinelBackend:
         lib_path = self.platform.pkcs11_module
         certutil = shutil.which("certutil")
 
-        if not modutil:
-            log("ERROR: 'modutil' not found (package nss-tools / libnss3-tools).")
-            log(f"Fix with: sudo {self.platform.install_hint()}")
-            emit(Event("led", "led-browsers", "error"))
-            return Outcome("configure-browsers", False, "modutil not found")
-        if not lib_path:
-            log("ERROR: opensc-pkcs11.so not found. Install OpenSC first.")
-            log(f"Fix with: sudo {self.platform.install_hint()}")
-            emit(Event("led", "led-browsers", "error"))
-            return Outcome("configure-browsers", False, "opensc-pkcs11.so not found")
         if not certutil:
-            log("WARNING: 'certutil' not found; the module will be registered but")
-            log("         no certificates imported, so the device may appear empty.")
+            log("WARNING: 'certutil' not found; the DoD roots cannot be imported")
+            log("         into the browsers, so CAC sites may still be refused.")
+            log(f"Fix with: sudo {self.platform.install_hint()}")
 
         # What is installed, and can each of them actually reach the card.
         # Reported before any write, because a sandboxed browser cannot be
@@ -400,34 +419,98 @@ class SentinelBackend:
         for browser in browsers:
             log(f"Browser: {browser.name} -- {browser.detail}")
 
+        # Ask p11-kit before doing anything. It decides whether the manual
+        # module registration below is needed at all.
+        p11_kit = platform_mod.p11_kit_present()
+        card_present, card_detail = platform_mod.p11_kit_exposes_card()
+        self.logger.info(
+            f"p11-kit present: {p11_kit}; card visible to p11-kit: {card_present} "
+            f"({card_detail})"
+        )
+
+        if p11_kit:
+            log("PKCS#11 access: provided by p11-kit (p11-kit-proxy.so).")
+            log("              Browsers reach the card through it already, so")
+            log("              Sentinel will not register OpenSC a second time.")
+        else:
+            log("PKCS#11 access: p11-kit is not installed, so the OpenSC module")
+            log("              has to be registered in each browser by hand.")
+
+        if not card_present:
+            # This is the popup case. A CAC that is not in the reader cannot be
+            # shown working, and the two reasons need different fixes, so the
+            # detail travels with the event.
+            log("")
+            log(f"NOTE: {card_detail}.")
+            log("      A CAC has to be in the reader for the browser to offer it.")
+            emit(Event("card-prompt", card_detail))
+
         nss_paths = nss_databases()
-        log(f"Module:  {lib_path}")
+        if lib_path:
+            log(f"Module:  {lib_path}")
         log(f"Found {len(nss_paths)} NSS database(s).")
+
+        # Checked before the dry run returns, because a dry run that plans a step
+        # it cannot perform has failed at the only job it has. Without p11-kit
+        # these two binaries are the whole mechanism, so their absence is a real
+        # blocker rather than something to discover halfway through.
+        if not p11_kit:
+            if not modutil:
+                log("ERROR: 'modutil' not found (package nss-tools / libnss3-tools).")
+                log("       Without p11-kit and without modutil there is no way to")
+                log("       register the card module in your browser.")
+                log(f"Fix with: sudo {self.platform.install_hint()}")
+                self.logger.error("Browser configuration: modutil not found")
+                emit(Event("led", "led-browsers", "error"))
+                return Outcome("configure-browsers", False, "modutil not found")
+            if not lib_path:
+                log("ERROR: opensc-pkcs11.so not found. Install OpenSC first.")
+                log(f"Fix with: sudo {self.platform.install_hint()}")
+                self.logger.error("Browser configuration: opensc-pkcs11.so not found")
+                emit(Event("led", "led-browsers", "error"))
+                return Outcome(
+                    "configure-browsers", False, "opensc-pkcs11.so not found"
+                )
 
         if dry_run:
             # A dry run reports the plan. Discovering that there is nothing to
             # do is a finding about the system, not a failure of the run.
             if not nss_paths:
-                log("No NSS databases found. Launch a browser once, then retry.")
+                log("No NSS databases found. Install a browser, then retry.")
             else:
                 for db_path in nss_paths:
                     log(f"Would update: {db_path}")
-            log("Would add the module and import the DoD roots into each.")
+            if p11_kit:
+                log("Would import the DoD roots into each. No module to add.")
+            else:
+                log("Would add the OpenSC module and import the DoD roots into each.")
             emit(Event("led", "led-browsers", "idle"))
             return Outcome(
                 "configure-browsers", True, "dry run",
                 {
                     "module": lib_path,
                     "databases": nss_paths,
+                    "p11_kit": p11_kit,
+                    "card_present": card_present,
+                    "card_detail": card_detail,
                     "browsers_running": platform_mod.browsers_running(),
                 },
             )
 
         if not nss_paths:
-            log("No NSS databases found. Launch a browser once, then retry.")
+            log("No browser with an NSS database was found.")
+            log("Install Firefox or Chrome from your distribution's packages,")
+            log("then run CONFIG BROWSERS again.")
+            self.logger.error("Browser configuration: no NSS databases found")
             emit(Event("led", "led-browsers", "error"))
-            return Outcome("configure-browsers", False, "no NSS databases found")
+            return Outcome(
+                "configure-browsers", False, "no NSS databases found",
+                {"p11_kit": p11_kit, "card_present": card_present,
+                 "card_detail": card_detail},
+            )
 
+        # modutil and the OpenSC path are checked above, before the dry run
+        # returns, because they are only required when p11-kit is absent.
         running = platform_mod.browsers_running()
         if running:
             # Firefox rewrites prefs.json on exit and discards the change.
@@ -437,30 +520,71 @@ class SentinelBackend:
 
         bundle = os.path.join(self.SCRIPT_DIR, TRUST_ANCHOR_NAME)
         have_bundle = os.path.exists(bundle)
+        if not have_bundle:
+            self.logger.warning(
+                f"Trust bundle {TRUST_ANCHOR_NAME} not found next to the source; "
+                "certificates cannot be imported into the browsers"
+            )
 
         succeeded: list[str] = []
         failed: list[dict] = []
 
         for db_path in nss_paths:
+            # A Chromium database that does not exist yet is created here rather
+            # than refused earlier. modutil cannot create the directory itself
+            # -- it exits 46 with SEC_ERROR_BAD_DATABASE -- so this has to
+            # happen before the first modutil call, not inside it.
+            if not os.path.isdir(db_path):
+                if platform_mod.ensure_nss_directory(db_path):
+                    log(f"Created {db_path}")
+                    self.logger.info(f"Created NSS database directory {db_path}")
+                else:
+                    reason = f"could not create the directory {db_path}"
+                    log(f"Updating: {db_path}...")
+                    log(f"  -> FAILED: {reason}")
+                    self.logger.error(f"Browser config {db_path}: {reason}")
+                    failed.append({"database": db_path, "error": reason})
+                    continue
+
             log(f"Updating: {db_path}...")
             self.logger.info(f"Browser config: {db_path}")
             ok, reason = await self._configure_one(
-                modutil, certutil, lib_path, bundle, db_path, have_bundle
+                modutil, certutil, lib_path, bundle, db_path, have_bundle,
+                register_module=not p11_kit,
             )
             if ok:
-                log("  -> verified: module present and roots imported.")
+                # The reason is not decoration. `_configure_one` reports a partial
+                # result by returning ok=True with a reason, and the old code
+                # printed "roots imported" on the strength of ok alone -- so a
+                # certificate import that had failed in every single run was
+                # reported to the user as a success, in the one message they were
+                # most likely to believe.
+                if reason:
+                    log(f"  -> card module ready, but: {reason}")
+                else:
+                    log("  -> verified: card module available and roots imported.")
                 succeeded.append(db_path)
             else:
                 log(f"  -> FAILED: {reason}")
+                # The reason goes to the log file as well as the console. A user
+                # who reports "browser config failed" from the field can only be
+                # helped if the reason is somewhere they can send.
+                self.logger.error(f"Browser config {db_path} failed: {reason}")
                 failed.append({"database": db_path, "error": reason})
 
         if not succeeded:
             log(f"FAILED: none of the {len(nss_paths)} database(s) could be configured.")
-            self.logger.error("Browser configuration: no database succeeded")
+            self.logger.error(
+                f"Browser configuration: no database succeeded "
+                f"({len(failed)} failure(s): "
+                f"{'; '.join(f['error'] for f in failed) or 'no databases'})"
+            )
             emit(Event("led", "led-browsers", "error"))
             return Outcome(
                 "configure-browsers", False, "no database configured",
-                {"databases": nss_paths, "failures": failed},
+                {"databases": nss_paths, "failures": failed,
+                 "p11_kit": p11_kit, "card_present": card_present,
+                 "card_detail": card_detail},
             )
 
         log(f"Configured and verified {len(succeeded)}/{len(nss_paths)} database(s).")
@@ -502,64 +626,215 @@ class SentinelBackend:
         return Outcome(
             "configure-browsers", not failed, f"{len(succeeded)}/{len(nss_paths)} configured",
             {"succeeded": succeeded, "failed": failed, "browsers_running": running,
-             "confined": [b.name for b in confined]},
+             "confined": [b.name for b in confined], "p11_kit": p11_kit,
+             "card_present": card_present, "card_detail": card_detail},
         )
 
     async def _configure_one(
-        self, modutil, certutil, lib_path, bundle, db_path, have_bundle
+        self, modutil, certutil, lib_path, bundle, db_path, have_bundle,
+        register_module: bool = True,
     ) -> tuple[bool, str]:
-        """Add the module to one NSS database and verify the result."""
-        try:
-            rc, stdout, _ = await run(
-                [modutil, "-dbdir", f"sql:{db_path}", "-list", MODULE_NAME],
-                timeout=NSS_TIMEOUT,
-            )
-            if rc == 0 and MODULE_NAME in stdout:
-                # Present, but it may still be pointed at a stale library path.
-                if lib_path in stdout:
-                    module_ok = True
-                else:
-                    log_stale = stdout.strip()
-                    rc, _, err = await run(
-                        [modutil, "-force", "-dbdir", f"sql:{db_path}",
-                         "-add", MODULE_NAME, "-libfile", lib_path],
-                        timeout=NSS_TIMEOUT,
-                    )
-                    if rc != 0:
-                        return False, f"could not repoint module ({err.strip() or rc})"
-                    module_ok = True
-            else:
-                rc, _, err = await run(
-                    [modutil, "-force", "-dbdir", f"sql:{db_path}",
-                     "-add", MODULE_NAME, "-libfile", lib_path],
-                    timeout=NSS_TIMEOUT,
-                )
-                if rc != 0:
-                    return False, err.strip() or f"modutil -add exit {rc}"
-                module_ok = True
+        """Make one NSS database ready to use the card, then verify it.
 
-            if module_ok and certutil and have_bundle:
-                rc, _, err = await run(
-                    [certutil, "-N", "-d", f"sql:{db_path}", "-A",
-                     "-n", "DoD Root CAs", "-t", "C,,", "-i", bundle],
-                    timeout=NSS_TIMEOUT,
+        `register_module=False` is the p11-kit case. The database already has
+        `p11-kit-proxy.so` registered and loaded, and that proxy is what gives
+        the browser the card, so the only work left is importing the DoD roots.
+        Adding an opensc-pkcs11.so entry here would duplicate p11-kit's own
+        registration, which NSS rejects.
+
+        Either way the result is verified by reading the database back, not by
+        trusting an exit code. Returns (ok, reason); reason is empty on success.
+        """
+        try:
+            if register_module:
+                module_ok, reason = await self._register_module(
+                    modutil, lib_path, db_path
                 )
-                if rc != 0:
-                    # Not fatal: the module is registered, which is the part
-                    # that makes the card appear. Say so rather than claiming
-                    # success.
-                    return True, f"module added, certificate import failed: {err.strip() or rc}"
+                if not module_ok:
+                    return False, reason
+            else:
+                present, reason = await self._p11_kit_registered(modutil, db_path)
+                if not present:
+                    return False, reason
+
+            imported, import_reason = 0, ""
+            if certutil and have_bundle:
+                imported, import_reason = await self._import_roots(certutil, bundle, db_path)
+                if not imported:
+                    # Not fatal for the card: the module is what makes the card
+                    # appear, and that part is done. But it is fatal for actually
+                    # reaching a CAC site, so it is reported as a partial result
+                    # rather than being folded into a success.
+                    self.logger.error(
+                        f"Browser config {db_path}: {import_reason}"
+                    )
 
             # Verify by reading back rather than trusting the exit code.
-            rc, stdout, _ = await run(
-                [modutil, "-dbdir", f"sql:{db_path}", "-list", MODULE_NAME],
-                timeout=NSS_TIMEOUT,
-            )
-            if rc != 0 or MODULE_NAME not in stdout:
-                return False, "module absent after write"
-            return True, ""
+            if register_module:
+                rc, stdout, _ = await run(
+                    [modutil, "-dbdir", f"sql:{db_path}", "-list", MODULE_NAME],
+                    timeout=NSS_TIMEOUT,
+                )
+                if rc != 0 or MODULE_NAME not in stdout:
+                    return False, "module absent after write"
+            else:
+                present, reason = await self._p11_kit_registered(modutil, db_path)
+                if not present:
+                    return False, f"p11-kit proxy not usable after write: {reason}"
+            return True, import_reason
         except Exception as exc:  # defensive: one bad profile must not stop the rest
             return False, str(exc)
+
+    async def _import_roots(self, certutil, bundle, db_path) -> tuple[int, str]:
+        """Import every DoD root from the bundle into one NSS database.
+
+        Returns (count_imported, reason); reason is empty on a clean import.
+
+        Two things were wrong here, and both failed silently.
+
+        The command was `certutil -N -d <db> -A -n ... -i <bundle>`. certutil
+        accepts exactly one command per invocation and rejects that outright:
+
+            certutil: only one command at a time!
+            You entered:  -A -N
+
+        So the import never happened, on any machine, ever. `-N` creates a new
+        empty database and is not needed at all: `-A` initialises the database
+        files itself when the directory is empty.
+
+        And all seven roots were being imported under one nickname,
+        "DoD Root CAs". NSS treats the nickname as a key, so the first import
+        succeeds and the rest fail with SEC_ERROR_ADDING_CERT. One of seven DoD
+        roots reached the browser and the other six were silently dropped, which
+        is enough to make some CAC sites work and others fail in a way that
+        looks like a server problem.
+
+        So each certificate is imported separately, under a nickname derived from
+        its own common name, and the number that actually landed is counted and
+        returned rather than assumed.
+        """
+        try:
+            with open(bundle, encoding="utf-8", errors="replace") as fh:
+                pems = sentinel_certs.split_pem(fh.read())
+        except OSError as exc:
+            return 0, f"the trust bundle could not be read: {exc}"
+
+        if not pems:
+            return 0, "the trust bundle contains no certificates"
+
+        imported = 0
+        problems: list[str] = []
+        for index, pem in enumerate(pems):
+            nickname = await asyncio.to_thread(self._root_nickname, pem, index)
+            path = os.path.join(
+                self.SCRIPT_DIR, f".sentinel-root-{os.getpid()}-{index}.pem"
+            )
+            try:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(pem if pem.endswith("\n") else pem + "\n")
+                rc, _, err = await run(
+                    [certutil, "-d", f"sql:{db_path}", "-A",
+                     "-n", nickname, "-t", "C,,", "-i", path],
+                    timeout=NSS_TIMEOUT,
+                )
+            finally:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            if rc == 0:
+                imported += 1
+            else:
+                problems.append(f"{nickname} ({err.strip() or f'exit {rc}'})")
+
+        if imported == len(pems):
+            return imported, ""
+        return imported, (
+            f"only {imported} of {len(pems)} DoD roots could be added to this "
+            f"browser: {'; '.join(problems)}"
+        )
+
+    def _root_nickname(self, pem: str, index: int) -> str:
+        """A unique nickname for one root certificate.
+
+        The common name is used because it is unique across the DoD bundle --
+        "DoD Root CA 2" through "DoD Root CA 5" plus the ECA and WCF roots --
+        and it is what a person recognises in Firefox's certificate manager. The
+        index is appended as a backstop so two roots with a shared common name
+        cannot collide into the same failure this method exists to prevent.
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as workdir:
+            name = sentinel_certs.common_name(pem, workdir, "root.pem")
+        safe = re.sub(r"[^A-Za-z0-9 ._-]", "", name).strip() or "DoD Root"
+        return f"{safe} [{index + 1}]" if safe else f"DoD Root {index + 1}"
+
+    async def _p11_kit_registered(self, modutil, db_path) -> tuple[bool, str]:
+        """Is p11-kit-proxy registered and loaded in this database?
+
+        That is the state that means "this browser can reach the card". If p11-kit
+        is installed system-wide but the proxy is somehow missing from the
+        browser's own database, the browser still cannot see the card, so this
+        is checked rather than assumed from p11-kit being installed.
+
+        The whole module list has to be read and searched, rather than asking
+        `modutil -list <name>`. p11-kit registers itself as an NSS *security
+        module*, which NSS stores in secmod.db, not in the pkcs11.txt that
+        `modutil -add` writes. `modutil -list p11-kit-proxy` therefore answers
+        "not found in database" for a database where the proxy is present and
+        loaded -- which is every working browser on a p11-kit system. Asking the
+        wrong question here reported a perfectly good browser as broken.
+
+        Both the name and `status: loaded` are required. A registered-but-not
+        loaded proxy is exactly the failure the original module existed to catch,
+        so its absence of a loaded status has to be treated as a failure.
+        """
+        if not modutil:
+            return False, "modutil is not installed, so the database cannot be checked"
+        rc, stdout, _ = await run(
+            [modutil, "-dbdir", f"sql:{db_path}", "-list"],
+            timeout=NSS_TIMEOUT,
+        )
+        if rc != 0:
+            return False, f"the database could not be read (modutil exit {rc})"
+        if P11_KIT_MODULE_NAME not in stdout:
+            return False, (
+                f"{P11_KIT_MODULE_NAME} is not registered in this browser's "
+                "database, so the browser cannot reach the card through p11-kit"
+            )
+        # Confirm it is the entry that is loaded, not merely mentioned: the name
+        # also appears on the `library name:` line of the same block.
+        for block in _module_blocks(stdout):
+            if P11_KIT_MODULE_NAME in block and "status: loaded" in block:
+                return True, ""
+        return False, (
+            f"{P11_KIT_MODULE_NAME} is registered but not loaded, so the browser "
+            "cannot use it; restarting p11-kit or the browser usually fixes this"
+        )
+
+    async def _register_module(self, modutil, lib_path, db_path) -> tuple[bool, str]:
+        """Write an OpenSC module entry into one database, the pre-p11-kit way.
+
+        Kept because it is still the only option on a machine with no p11-kit,
+        and because it is the fix for a browser whose proxy entry is broken.
+        """
+        rc, stdout, _ = await run(
+            [modutil, "-dbdir", f"sql:{db_path}", "-list", MODULE_NAME],
+            timeout=NSS_TIMEOUT,
+        )
+        already_ok = rc == 0 and MODULE_NAME in stdout and lib_path in stdout
+        if already_ok:
+            return True, ""
+
+        rc, _, err = await run(
+            [modutil, "-force", "-dbdir", f"sql:{db_path}",
+             "-add", MODULE_NAME, "-libfile", lib_path],
+            timeout=NSS_TIMEOUT,
+        )
+        if rc != 0:
+            return False, _explain_add_failure(err, stdout)
+        return True, ""
 
     async def diagnose_reader(self, emit: Emit, dry_run: bool = False) -> Outcome:
         """Explain, in plain language, why the card is not being seen.
@@ -703,6 +978,85 @@ class SentinelBackend:
 
         log("SUCCESS: DoD trust anchors removed and trust store refreshed.")
         return Outcome("uninstall-certs", True, "removed", {"removed": present})
+
+
+def _module_blocks(listing: str) -> list[str]:
+    """Split `modutil -list` output into one block of text per module.
+
+    modutil prints each module as an indented header followed by its details and
+    slots, with no terminator, so "is this module loaded" cannot be answered by
+    searching the whole output: the name of one module and the status of another
+    can both be present, and a naive search pairs them. Splitting on the module
+    headers keeps each module's own status with its own name.
+
+    A header is a line whose first non-space character is a digit and whose
+    second token is a period, which is the shape modutil uses:
+
+        1. NSS Internal PKCS #11 Module
+        2. p11-kit-proxy
+    """
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in listing.splitlines():
+        stripped = line.strip()
+        is_header = bool(
+            stripped
+            and stripped[0].isdigit()
+            and len(stripped) > 1
+            and stripped[1] == "."
+        )
+        if is_header and current:
+            blocks.append("\n".join(current))
+            current = []
+        current.append(line)
+    if current:
+        blocks.append("\n".join(current))
+    return blocks
+
+
+def _explain_add_failure(stderr: str, stdout: str = "") -> str:
+    """Turn an NSS failure into something the user can act on.
+
+    NSS reports a refused module as
+
+        ERROR: Failed to add module "DoD CAC". Probable cause : "Unknown PKCS #11 error".
+
+    which names neither the library, the path, nor the reason, and appears
+    identically whether the library is missing, unloadable, or already
+    registered by something else. Surfacing that string verbatim is how a field
+    failure became undiagnosable, so the known cases are translated and
+    anything unrecognised is passed through with its exit status rather than
+    being flattened into "exit 22".
+
+    The p11-kit collision is the important one: it is the expected outcome of
+    following the manual instructions on a modern distribution, so a user who
+    hits it needs to be told the browser is fine, not that the tool failed.
+    """
+    combined = f"{stdout}\n{stderr}"
+    detail = stderr.strip() or stdout.strip()
+
+    if "p11-kit is enabled" in combined or "duplicate module registration" in combined:
+        return (
+            "p11-kit has already registered the card module for this browser, so "
+            "there is nothing to add -- the browser can reach the card as it is. "
+            "See the p11-kit line in the output above."
+        )
+    if "cannot open shared object file" in combined:
+        return (
+            "the OpenSC PKCS#11 module could not be opened. OpenSC is probably "
+            "not installed; run the install step, or check the module path."
+        )
+    if "already exists" in combined or "already in use" in combined:
+        return "a module with that name is already registered under a different path."
+
+    if "Unknown PKCS #11 error" in combined:
+        return (
+            f"NSS refused the module without giving a reason ({detail or 'exit 22'}). "
+            "This is what NSS reports when the module will not initialise -- most "
+            "often because the smart card daemon is not running or the reader is "
+            "not responding. Run 'sentinel doctor' to see which."
+        )
+    return detail or "modutil -add failed with no message"
 
 
 def _parse_slots(stdout: str) -> list[str]:
