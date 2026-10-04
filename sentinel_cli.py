@@ -1,6 +1,7 @@
 """Headless interface to the Sentinel backend.
 
     sentinel check                 probe the smart-card stack
+    sentinel doctor-browser        will this browser offer my card? (read-only)
     sentinel install-certs         install the DoD self-signed roots (needs pkexec)
     sentinel verify-bundle         check the shipped DoD roots against the manifest
     sentinel configure-browsers    register the PKCS#11 module in every NSS database
@@ -53,13 +54,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "action",
-        choices=("setup", "doctor", "all", "uninstall-certs", "verify-bundle", *ACTIONS),
+        choices=("setup", "doctor", "doctor-browser", "all", "uninstall-certs",
+                 "verify-bundle", *ACTIONS),
         help=(
-            "setup         configure everything in order, say whether it worked\n"
-            "doctor        explain, in plain language, why the card is not seen\n"
-            "all           every action, machine-readable summary only\n"
-            "verify-bundle check the shipped DoD roots against the manifest;\n"
-            "              read-only and needs no network"
+            "setup           configure everything in order, say whether it worked\n"
+            "doctor          explain, in plain language, why the card is not seen\n"
+            "doctor-browser  will my browser actually offer my card? read-only,\n"
+            "                and the one to run when setup says green but the\n"
+            "                browser still does nothing\n"
+            "all             every action, machine-readable summary only\n"
+            "verify-bundle   check the shipped DoD roots against the manifest;\n"
+            "                read-only and needs no network"
         ),
         metavar="ACTION",
     )
@@ -134,6 +139,8 @@ async def dispatch(backend: SentinelBackend, action: str, dry_run: bool) -> list
         return [await backend.fix_opensc_conf(_print, dry_run)]
     if action == "diagnose":
         return [await backend.diagnose_reader(_print, dry_run)]
+    if action == "diagnose-browser":
+        return [await backend.diagnose_browser(_print, dry_run)]
     if action == "uninstall-certs":
         return [await backend.uninstall_certs(_print, dry_run)]
     raise ValueError(action)
@@ -191,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_setup_mode(backend, args, platform)
     if args.action == "doctor":
         return _run_doctor_mode(backend, args, platform)
+    if args.action == "doctor-browser":
+        return _run_browser_doctor_mode(backend, args, platform)
 
     actions = list(ACTIONS) if args.action == "all" else [args.action]
 
@@ -245,6 +254,28 @@ def _run_doctor_mode(backend, args, platform) -> int:
         print("    sentinel setup")
     else:
         print("  Your card reader needs attention. Each fix is listed above.")
+    print("=" * 60)
+    if args.json:
+        print(json.dumps(outcome.to_dict(), indent=2, sort_keys=True))
+    return 0 if outcome.ok else 1
+
+
+def _run_browser_doctor_mode(backend, args, platform) -> int:
+    """`sentinel doctor-browser`: will this browser offer my card?
+
+    The command to run when the setup says green and the browser still does
+    nothing. Read-only: no writes, no privileges, no network.
+    """
+    print(f"Sentinel {VERSION} — will your browser offer your CAC?")
+    print()
+    outcome = asyncio.run(backend.diagnose_browser(_print, args.dry_run))
+    print()
+    print("=" * 60)
+    if outcome.ok:
+        print("  Yes. Your browser should offer your card when a site asks.")
+    else:
+        print(f"  No — {len(outcome.data.get('problems', []))} thing(s) to fix,")
+        print("  listed above in the order they matter.")
     print("=" * 60)
     if args.json:
         print(json.dumps(outcome.to_dict(), indent=2, sort_keys=True))

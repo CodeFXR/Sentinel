@@ -639,9 +639,18 @@ class SentinelBackend:
         )
 
         if p11_kit:
-            log("PKCS#11 access: provided by p11-kit (p11-kit-proxy.so).")
-            log("              Browsers reach the card through it already, so")
-            log("              Sentinel will not register OpenSC a second time.")
+            # Scoped, because the previous wording was a claim about every
+            # browser made from one host-wide measurement. A snap or Flatpak
+            # browser cannot see the host's p11-kit at all, so "browsers reach
+            # the card through it already" was false for exactly the browser a
+            # user is most likely to be staring at -- and it was printed on the
+            # same run that then showed that browser as sandboxed, which is a
+            # self-contradiction nobody would act on.
+            log("PKCS#11 access: p11-kit is exposing a CAC to the host.")
+            log("              Browsers that are not sandboxed use it directly,")
+            log("              so Sentinel will not register OpenSC a second time.")
+            log("              A sandboxed browser cannot: it is cut off from the")
+            log("              host entirely, including p11-kit and pcscd.")
         else:
             log("PKCS#11 access: p11-kit is not installed, so the OpenSC module")
             log("              has to be registered in each browser by hand.")
@@ -772,7 +781,7 @@ class SentinelBackend:
                 if reason:
                     log(f"  -> roots written, but: {reason}")
                 else:
-                    log("  -> verified: card reachable and all DoD roots present.")
+                    log("  -> verified: all DoD roots present.")
                 # Worth showing, worth failing over: not. See _p11_kit_registered.
                 if p11_kit and modutil:
                     present, _ = await self._p11_kit_registered(modutil, db_path)
@@ -780,6 +789,23 @@ class SentinelBackend:
                         log("     Note: this browser keeps no p11-kit entry of its own.")
                         log("     That is normal for Chrome and Chromium, which use the")
                         log("     system p11-kit directly. Nothing to do.")
+                # A Firefox profile also has to be told to *offer* the card.
+                # Roots in the trust store only let the browser validate the
+                # server; whether it asks the user to pick a client certificate
+                # is a separate setting, and left at the default Firefox picks
+                # one itself. A CAC site asking for a client certificate then
+                # gets nothing, and the symptom -- a site that never prompts --
+                # is indistinguishable from a card that cannot be read.
+                if os.path.isfile(os.path.join(db_path, "cert9.db")) and \
+                        not db_path.endswith(os.path.join(".pki", "nssdb")):
+                    asked, why = sentinel_browser.set_firefox_asks_every_time(db_path)
+                    if asked:
+                        log("     Set to ask which certificate to use on every request.")
+                    elif not dry_run:
+                        log(f"     WARNING: could not set the certificate preference: {why}")
+                        self.logger.warning(
+                            f"Browser config {db_path}: ask-every-time not set: {why}"
+                        )
                 succeeded.append(db_path)
             else:
                 log(f"  -> FAILED: {reason}")
@@ -807,15 +833,41 @@ class SentinelBackend:
         log(f"Configured and verified {len(succeeded)}/{len(nss_paths)} database(s).")
         if failed:
             log(f"{len(failed)} database(s) failed; see the lines above.")
-        log("Close and restart browsers to apply.")
 
-        # A green LED means a browser can use the card. Writing to an NSS
-        # database inside a sandbox proves the write worked, not that the
-        # browser can load the module. Claiming green there is the v1.0.0 bug
-        # in a new place, so a confined browser gets its own state instead.
+        # --- can each browser actually reach the card? ------------------------
+        # Everything above proves the DoD roots are in a database. Nothing above
+        # proves a browser can read the card, and conflating the two is how this
+        # step produced a green light on a machine where the browser in use could
+        # not see a CAC at all.
+        unreachable = [b for b in browsers if b.confined]
+        unconfigured = sentinel_browser.installed_browsers_without_profile()
+
+        if unreachable:
+            for browser in unreachable:
+                log("")
+                log(f"!! {browser.name} CANNOT use your smart card.")
+                for line in sentinel_browser.guidance_for(browser).splitlines():
+                    log(f"   {line}")
+
+        if unconfigured:
+            # The field case. The log showed only ~/.pki/nssdb on every run while
+            # the browser the user actually launches was never touched, and the
+            # step reported success. A browser with no profile has not been
+            # configured; it is not configured, and saying nothing about it is
+            # what made the green light meaningless.
+            log("")
+            log("These browsers are installed but were NOT configured:")
+            for label in unconfigured:
+                log(f"   - {label}")
+            log("They have never been started, so they have no profile for Sentinel")
+            log("to write to. Start the one you use, then run CONFIG BROWSERS again.")
+
+        # A green LED is only earned when a browser that is not sandboxed can
+        # reach the card. It says "a browser can use your card", not "a file was
+        # written" -- and the two came apart on the machine that prompted this.
         usable = [b for b in browsers if not b.confined and b.nss_databases]
-        if confined and not usable:
-            for browser in confined:
+        if not usable:
+            for browser in unreachable:
                 log("")
                 log(f"!! {browser.name} cannot use your smart card.")
                 log("")
@@ -826,24 +878,52 @@ class SentinelBackend:
             return Outcome(
                 "configure-browsers", False,
                 "the only browser installed cannot load a smart card",
-                {"succeeded": succeeded, "confined": [b.name for b in confined],
-                 "guidance": [sentinel_browser.guidance_for(b) for b in confined]},
+                {"succeeded": succeeded, "confined": [b.name for b in unreachable],
+                 "unconfigured": unconfigured,
+                 "guidance": [sentinel_browser.guidance_for(b) for b in unreachable]},
             )
 
-        if confined:
-            for browser in confined:
-                log("")
-                log(f"Note: {browser.name} cannot use your smart card.")
-                for line in sentinel_browser.guidance_for(browser).splitlines():
-                    log(f"   {line}")
+        # Every database was written, but at least one browser Sentinel knows
+        # about cannot use the card, and a browser it never saw has not been
+        # configured at all. Reporting plain success there is the false green.
+        blocked = bool(unreachable or unconfigured)
+
+        if blocked:
+            log("")
+            log("The DoD roots are installed, but this is NOT a working setup yet:")
+            for browser in unreachable:
+                log(f"  - {browser.name} is sandboxed and cannot read the card.")
+            for label in unconfigured:
+                log(f"  - {label} is installed but has never been started, so it")
+                log("    has no profile and was not configured.")
+            log("")
+            log("Fix the items above, then run CONFIG BROWSERS again.")
+            self.logger.warning(
+                f"Browser configuration: roots written but {len(unreachable)} "
+                f"sandboxed browser(s) and {len(unconfigured)} unconfigured "
+                f"browser(s)"
+            )
+            emit(Event("led", "led-browsers", "error"))
+            return Outcome(
+                "configure-browsers", False,
+                f"roots written, but {len(unreachable) + len(unconfigured)} "
+                f"browser(s) cannot use the card",
+                {"succeeded": succeeded, "failed": failed,
+                 "browsers_running": running,
+                 "confined": [b.name for b in unreachable],
+                 "unconfigured": unconfigured,
+                 "p11_kit": p11_kit, "card_present": card_present,
+                 "card_detail": card_detail},
+            )
 
         # Green only on the strength of a post-write verification against a
-        # browser that is not sandboxed.
+        # browser that is not sandboxed, and with nothing known to be blocking.
+        log("Close and restart browsers to apply.")
         emit(Event("led", "led-browsers", "success"))
         return Outcome(
             "configure-browsers", not failed, f"{len(succeeded)}/{len(nss_paths)} configured",
             {"succeeded": succeeded, "failed": failed, "browsers_running": running,
-             "confined": [b.name for b in confined], "p11_kit": p11_kit,
+             "confined": [], "unconfigured": [], "p11_kit": p11_kit,
              "card_present": card_present, "card_detail": card_detail},
         )
 
@@ -853,13 +933,6 @@ class SentinelBackend:
     ) -> tuple[bool, str]:
         """Make one NSS database ready to use the card, then verify it.
 
-        `register_module=False` is the p11-kit case. The database already has
-        `p11-kit-proxy.so` registered and loaded, and that proxy is what gives
-        the browser the card, so the only work left is importing the DoD roots.
-        Adding an opensc-pkcs11.so entry here would duplicate p11-kit's own
-        registration, which NSS rejects.
-
-        Either way the result is verified by reading the database back, not by
         `register_module=False` is the p11-kit case, and the important property
         of that branch is what it does *not* require.
 
@@ -1091,6 +1164,126 @@ class SentinelBackend:
         if rc != 0:
             return False, _explain_add_failure(err, stdout)
         return True, ""
+
+    async def diagnose_browser(self, emit: Emit, dry_run: bool = False) -> Outcome:
+        """Answer the only question that matters: will this browser offer my card?
+
+        Everything else this tool reports is a fact about a file or a service.
+        The question a user actually has is whether their browser will ask them
+        to pick a certificate on a CAC site, and that has four separate
+        preconditions. Each is checked here and reported by name, so the answer
+        is a list rather than a light:
+
+        1. The card is readable at all -- by the host's p11-kit.
+        2. The browser is not sandboxed. A snap or Flatpak browser cannot see
+           the host's p11-kit or its pcscd, whatever the host can see.
+        3. The browser has a profile Sentinel can see. A browser that has never
+           been started has none, and was never configured.
+        4. Firefox is set to ask which certificate to use. Left at the default it
+           picks one itself, and a CAC site that never prompts looks exactly
+           like a card that cannot be read.
+
+        Read-only. No writes, no privileges, no network. This is the command to
+        run when the setup says green and the browser still does nothing, and it
+        is written for that moment specifically.
+        """
+        log = lambda text: emit(Event("log", text))
+        log("\n--- WILL MY BROWSER OFFER MY CARD? ---")
+        self.logger.info("Browser card-access diagnostic")
+
+        problems: list[str] = []
+
+        # 1. The card, as the host sees it.
+        card, detail = platform_mod.p11_kit_exposes_card()
+        if card:
+            log("1. Card readable by the host .......... YES")
+        else:
+            log(f"1. Card readable by the host .......... NO")
+            log(f"     {detail}.")
+            problems.append(
+                "The card is not readable. Insert it, and if it still is not, "
+                "run 'sentinel doctor'."
+            )
+
+        # 2 and 3. Which browsers exist, and which of them can reach the card.
+        browsers = sentinel_browser.inventory()
+        log("")
+        log("2. Browsers found:")
+        if not browsers:
+            log("     (none that Sentinel recognises)")
+        for browser in browsers:
+            if browser.confined:
+                verdict = "SANDBOXED -- cannot reach the card"
+                problems.append(
+                    f"{browser.name} is sandboxed and cannot read a smart card. "
+                    "Install it from your distribution's software centre instead."
+                )
+            elif not browser.nss_databases:
+                verdict = "installed, but never started"
+                problems.append(
+                    f"{browser.name} has never been started, so it has no profile "
+                    "and was not configured. Start it, then run CONFIG BROWSERS."
+                )
+            else:
+                verdict = "not sandboxed -- can reach the card"
+            log(f"     - {browser.name}: {verdict}")
+            log(f"       {browser.detail}")
+
+        unconfigured = sentinel_browser.installed_browsers_without_profile()
+        if unconfigured:
+            log("")
+            log("3. Installed but never started (not configured):")
+            for label in unconfigured:
+                log(f"     - {label}")
+            problems.append(
+                "Started no profile for: " + ", ".join(unconfigured)
+                + ". Start the browser you use, then run CONFIG BROWSERS again."
+            )
+        else:
+            log("")
+            log("3. Installed but never started ......... none")
+
+        # 4. Firefox certificate selection, per profile.
+        profiles = [
+            path for browser in browsers
+            for path in browser.nss_databases
+            if os.path.basename(os.path.dirname(path)) in ("firefox",)
+            or "firefox" in path
+        ]
+        log("")
+        log("4. Firefox set to ask which certificate to use:")
+        if not profiles:
+            log("     (no Firefox profile found)")
+        for profile in profiles:
+            if sentinel_browser.firefox_asks_every_time(profile):
+                log(f"     - {os.path.basename(profile)}: YES")
+            else:
+                log(f"     - {os.path.basename(profile)}: NO")
+                problems.append(
+                    f"Firefox profile {os.path.basename(profile)} is not set to "
+                    "'Ask me every time'. Run CONFIG BROWSERS to set it, or set it "
+                    "in Preferences > Privacy & Security > Certificates."
+                )
+
+        log("")
+        if not problems:
+            log("Everything checks out. Your browser should offer your CAC when a")
+            log("site asks for one.")
+            self.logger.info("Browser diagnostic: all checks passed")
+            emit(Event("led", "led-browsers", "success"))
+            return Outcome("diagnose-browser", True, "browser can offer the card",
+                           {"problems": [], "card_present": card})
+
+        log(f"{len(problems)} thing(s) to fix, in the order they matter:")
+        for index, problem in enumerate(problems, 1):
+            log(f"  {index}. {problem}")
+        self.logger.warning(
+            f"Browser diagnostic: {len(problems)} problem(s): {'; '.join(problems)}"
+        )
+        emit(Event("led", "led-browsers", "error"))
+        return Outcome("diagnose-browser", False, f"{len(problems)} problem(s)",
+                       {"problems": problems, "card_present": card,
+                        "card_detail": detail})
 
     async def diagnose_reader(self, emit: Emit, dry_run: bool = False) -> Outcome:
         """Explain, in plain language, why the card is not being seen.

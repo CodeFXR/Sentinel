@@ -211,6 +211,149 @@ def chromium_databases() -> list[str]:
     return [path]
 
 
+# Browsers a user is likely to launch, and the binary that proves each is
+# installed. Used to notice a browser that Sentinel never configured, which is
+# the state a false green hides: the tool writes the one database it found and
+# says nothing about the browser actually on the desktop.
+LAUNCHABLE = (
+    ("Firefox", "firefox"),
+    ("Firefox", "firefox-esr"),
+    ("Chromium", "chromium"),
+    ("Chromium", "chromium-browser"),
+    ("Google Chrome", "google-chrome"),
+    ("Brave", "brave-browser"),
+)
+
+
+def installed_browsers_without_profile() -> list[str]:
+    """Browsers installed here that have no profile Sentinel can write to.
+
+    A browser that has never been started has no profile, so there is nothing to
+    configure. That is not a failure -- but it is also not the same thing as
+    "configured", and conflating the two is how a machine ends up looking
+    complete from the inside while the browser the user actually launches was
+    never touched. A field report was exactly this: the log listed only
+    `~/.pki/nssdb` on every run, and the browser in use was not that one.
+
+    Reported rather than acted on, because the fix is "start the browser once",
+    which is the user's to do, not Sentinel's.
+
+    Returns display names, deduplicated, so a machine with both `chromium` and
+    `chromium-browser` is not told about the same browser twice.
+    """
+    profiles = _firefox_profiles()
+    have_firefox = any(profiles.values())
+    have_chromium = bool(chromium_databases())
+
+    missing: list[str] = []
+    for label, binary in LAUNCHABLE:
+        if not shutil.which(binary):
+            continue
+        if label == "Firefox":
+            configured = have_firefox
+        else:
+            configured = have_chromium
+        if not configured and label not in missing:
+            missing.append(label)
+    return missing
+
+
+# The preference that decides whether Firefox offers a choice of certificate or
+# picks one itself.
+#
+# Every set of community CAC instructions includes this step, and Sentinel did
+# not have it. Preferences > Privacy & Security > Certificates > "Ask me every
+# time" is `security.default_personal_cert` set to the empty string; the
+# alternative, "Select one automatically", is the string `auto`.
+#
+# It matters because a CAC site asks the browser to present a client
+# certificate, and there are usually several on the card -- the plain
+# certificate, the email certificate, and both halves of a dual-persona card.
+# Left on automatic, Firefox may pick the wrong one, or present none, and the
+# symptom is a site that never prompts, which looks exactly like a card that
+# cannot be read.
+#
+# Set through `user.js` rather than `prefs.js`: Firefox overwrites prefs.js from
+# its in-memory copy on exit, so a value written there while the browser is
+# running is discarded. user.js is applied on every start and wins over
+# prefs.js, which is what makes the setting stick.
+ASK_EVERY_TIME_PREF = "security.default_personal_cert"
+_ASK_EVERY_TIME_VALUE = ""
+
+
+def firefox_asks_every_time(profile: str) -> bool:
+    """True when this Firefox profile is set to ask which certificate to use.
+
+    Reads `user.js` and `prefs.js` in that order of authority. An unreadable or
+    absent file means "not set", which is False: the default is automatic
+    selection, so a profile with no such line has not been configured for CAC
+    use.
+    """
+    value = None
+    for name in ("user.js", "prefs.js"):
+        path = os.path.join(profile, name)
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                body = fh.read()
+        except OSError:
+            continue
+        match = re.search(
+            r'user_pref\(\s*"' + re.escape(ASK_EVERY_TIME_PREF) + r'"\s*,\s*"([^"]*)"\s*\)',
+            body,
+        )
+        if match:
+            value = match.group(1)
+            if name == "user.js":
+                break
+    return value == _ASK_EVERY_TIME_VALUE
+
+
+def set_firefox_asks_every_time(profile: str) -> tuple[bool, str]:
+    """Make one Firefox profile ask which certificate to use. Returns (ok, why).
+
+    Writes `user.js` because Firefox rewrites `prefs.js` on exit and discards
+    the change, which is the failure the existing code warns about elsewhere.
+    user.js is re-applied at every start and takes precedence, so the setting
+    survives the browser being closed -- which is the only way to get a value to
+    stick in a profile the user owns and Firefox also writes.
+    """
+    path = os.path.join(profile, "user.js")
+    line = f'user_pref("{ASK_EVERY_TIME_PREF}", "{_ASK_EVERY_TIME_VALUE}");'
+
+    existing = ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            existing = fh.read()
+    except OSError:
+        pass
+
+    pattern = re.compile(
+        r'^.*' + re.escape(ASK_EVERY_TIME_PREF) + r'.*$\n?', re.M
+    )
+    if pattern.search(existing):
+        updated = pattern.sub("", existing)
+        updated = updated.rstrip("\n")
+        updated = (updated + "\n" if updated else "") + line + "\n"
+    else:
+        separator = "" if not existing or existing.endswith("\n") else "\n"
+        updated = existing + separator + line + "\n"
+
+    try:
+        # user.js holds preferences, not secrets, but it is inside the user's
+        # profile and this tool should not widen access to anything it writes.
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as fh:
+            fh.write(updated)
+    except OSError as exc:
+        return False, f"could not write {path}: {exc}"
+
+    if not firefox_asks_every_time(profile):
+        return False, f"wrote {path} but the preference did not take effect"
+    return True, ""
+
+
 def inventory() -> list[Browser]:
     """Every browser that could hold a smart card configuration on this system."""
     profiles = _firefox_profiles()
