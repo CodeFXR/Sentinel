@@ -319,6 +319,44 @@ DESCRIPTION = (
 )
 
 
+def _published_files() -> set:
+    """Paths git tracks, relative to ROOT.
+
+    Uses git rather than a hand-kept list so the answer cannot drift from
+    .gitignore.
+
+    Falls back to "every file present" when git cannot answer, which is the
+    older behaviour. That is safe because the two callers only ever *narrow* the
+    set: `write_source_digests` writes whatever comes back, and
+    `verify_sources` reads a list that was written earlier. A fallback that is
+    too wide therefore cannot silently exclude anything -- the worst case is
+    that a file git would have filtered gets pinned, which a reviewer sees in
+    the diff.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            tracked = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+            if tracked:
+                return tracked
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    everything = set()
+    for directory in {
+        os.path.dirname(os.path.join(ROOT, relative)) for relative in SOURCES
+    }:
+        if not os.path.isdir(directory):
+            continue
+        for name in os.listdir(directory):
+            path = os.path.join(directory, name)
+            if os.path.isfile(path) and not name.endswith(".sha256"):
+                everything.add(os.path.relpath(path, ROOT))
+    return everything
+
+
 def write_source_digests() -> int:
     """Regenerate DoD_Roots.sources.sha256 from the bundles as they are now.
 
@@ -330,10 +368,22 @@ def write_source_digests() -> int:
     import importlib
     header = importlib.import_module("sentinel_certs")
 
-    # Only files DoD actually signed, and only ones this repository publishes.
-    # The full-chain PEMs are deliberately not published -- they hold issuing CAs
-    # and intermediates, and sit next to a trust-anchor bundle in a public
-    # repository -- and pinning them here would quietly put them back.
+    # Only files DoD actually signed AND that this repository publishes.
+    #
+    # Both conditions are needed, and each excludes real files:
+    #
+    #   * the full-chain PEMs hold issuing CAs and intermediates, and are
+    #     deliberately not published -- pinning them would quietly put them
+    #     back;
+    #   * `dod_pke_chain.pem` in the ECA bundle *is* covered by DoD's signed
+    #     manifest, and is still not published. Pinning it made
+    #     --verify-sources fail on a fresh clone, because the file the digest
+    #     described was not there. A pin list is a list of files that must
+    #     exist, so anything absent from the repository must be absent from it.
+    #
+    # `git ls-files` is the test for "published": it reflects .gitignore, which
+    # is where the exclusions are recorded and therefore where they can be
+    # checked rather than remembered.
     covered = set()
     for directory in sorted({
         os.path.dirname(os.path.join(ROOT, relative)) for relative in SOURCES
@@ -348,8 +398,9 @@ def write_source_digests() -> int:
             if len(parts) == 2:
                 covered.add(os.path.join(label, parts[1].strip()))
 
+    published = _published_files()
     rows = []
-    for relative in sorted(covered):
+    for relative in sorted(covered & published):
         path = os.path.join(ROOT, relative)
         if not os.path.isfile(path):
             continue
