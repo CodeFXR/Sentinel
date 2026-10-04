@@ -1,0 +1,24 @@
+# Sentinel DoD trust anchors -- manifest for DoD_Roots.pem
+#
+# One line per certificate, in bundle order:
+#   <sha256 of the PEM text>  <expiry, ISO-8601 UTC>  <X.509 SHA-256>  <common name>
+#
+# `sentinel verify-bundle` checks the bundle against this file. It needs no
+# network access, so "are my certificates current" is answerable on a machine
+# with no internet -- which is the normal case on a unit.
+#
+# Provenance: the roots are extracted from the DoD PKI bundles published at
+#   https://dl.dod.cyber.mil/wp-content/uploads/pki-pke/zip/
+# and every extracted certificate must be self-signed before it is included, so
+# this file can never contain an issuing CA promoted to a root of trust.
+#
+# To refresh: run tools/refresh_roots.py, which rebuilds DoD_Roots.pem from the
+# source bundles in this repository and rewrites this manifest alongside it.
+
+b391da0d59122c3188fc0a82adfc134fb36ee5362c902e64b60502a6bf0abe0e  2029-12-30T16:13:04Z  34:3F:F5:30:F2:46:B0:0C:71:61:6A:5D:42:54:1D:55:11:14:BA:F7:4B:7F:78:6C:7B:42:52:75:86:C6:B2:2A  ECA Root CA 4
+7aa4a1b7dc9139210aca88ba0e9afcbc1be5a6012edc21b0a575b41a34fdc610  2050-03-12T15:34:56Z  DD:F1:C1:8F:91:EE:0B:DB:64:84:6E:2E:6A:4E:9E:42:EB:EA:47:FF:4B:0D:7F:6A:8E:9F:03:61:19:AF:94:5D  ECA Root CA 5
+e93d0f8ce6d4a176af143d74ed6e5a3add90c1382d14f29c382d2457225a581e  2030-12-30T19:47:33Z  9B:52:12:D9:2D:07:3B:1D:5E:8D:67:2E:94:D1:FB:47:2F:46:D1:5A:EA:2E:E4:D1:31:E5:C6:43:6B:74:B8:6E  DoD WCF Root CA 1
+dcfa9e6f7e1a10d851a56d5915c37f4d0178693ddcd68d005b079bd6d76403a5  2041-06-14T17:17:27Z  1F:4E:DE:9D:C2:A2:41:F6:52:1B:F5:18:42:4A:CD:49:EB:E8:44:20:E6:9D:AF:5B:AC:57:AF:1F:8E:E2:94:A9  DoD Root CA 5
+3a749f266c18352e77f494120efaeb4d5f4bf7e5f62c5b2de0804453e4c045bd  2032-07-25T19:48:23Z  55:9A:51:89:45:2B:13:F8:23:3F:00:22:36:3C:06:F2:6E:3C:51:7C:1D:4B:77:44:50:35:95:9D:F3:24:4F:74  DoD Root CA 4
+98f5a7cecd9b8f87436e540dc5ebe17ab2c52633b4afa2eab5f8cf20964115ea  2029-12-30T18:46:41Z  B1:07:B3:3F:45:3E:55:10:F6:8E:51:31:10:C6:F6:94:4B:AC:C2:63:DF:01:37:F8:21:C1:B3:C2:F8:F8:63:D2  DoD Root CA 3
+5fb15cc7e9efce7156002118f58b9128cf2ada14cc3dbc4827954c4757b5077d  2029-12-05T15:00:10Z  96:76:F2:87:35:6C:89:A1:26:83:D6:52:34:09:8C:B7:7C:4F:1C:18:F2:3C:0E:54:1D:E0:E1:96:72:5B:7E:BE  DoD Root CA 2

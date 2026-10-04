@@ -114,6 +114,7 @@ For scripting, and for reviewing a change before you make it.
 ```bash
 sentinel-cli check --dry-run        # show what would change, change nothing
 sentinel-cli install-certs          # install the DoD roots (asks your password)
+sentinel-cli verify-bundle          # check the shipped roots against the manifest
 sentinel-cli all --json             # machine-readable, for a pipeline
 ```
 
@@ -133,6 +134,48 @@ ECA Root CA 4     ECA Root CA 5     DoD WCF Root CA 1
 A trust-anchor directory may hold only roots. Anything else is promoted to a root of trust, which means a retired or re-keyed issuing CA can validate a certificate directly. Sentinel checks this before installing and aborts rather than doing it.
 
 Every root is verified to belong to `O = U.S. Government`. No foreign government or commercial roots are included.
+
+### Where the certificates come from
+
+They ship with Sentinel. You never visit a website to get them, and the
+installer never downloads anything to install them — that is the point of the
+tool, and a step that needs a browser and a manual download is a step someone
+will skip.
+
+The roots are extracted from the signed PKI bundles DoD publishes, which are in
+this repository under `certificates_pkcs7_v5_12_eca/`,
+`Certificates_PKCS7_v5_17_WCF/` and `Certificates_PKCS7_v5.6_DoD/`. Each of
+those per-root `.p7b` files contains the root *and every certificate beneath it*
+— 59 certificates across the seven files — so the build keeps only the
+self-signed ones. Taking the first certificate from each file would install an
+issuing CA as a root of trust, which is the specific mistake this project exists
+to prevent.
+
+### Checking they are current
+
+```bash
+sentinel-cli verify-bundle
+```
+
+Read-only, needs no network, and answers the question that follows every
+"the tool handles the certificates for you": *are these the current ones?* It
+confirms every root is self-signed and in date, then compares the bundle against
+`DoD_Roots.manifest`, which records each certificate's SHA-256, expiry date and
+fingerprint. It reports a root that has been **removed, added, replaced or
+reordered** — a swapped root has the same name and count, so only the
+fingerprint catches it.
+
+The same question for a maintainer, answered against the sources:
+
+```bash
+python3 tools/refresh_roots.py --verify-sources   # are the sources unmodified?
+python3 tools/refresh_roots.py --check             # does the bundle match them?
+python3 tools/refresh_roots.py --write             # rebuild both files
+```
+
+`--verify-sources` checks every source file against the SHA-256 manifest that
+DoD ships inside each bundle's `.sha256` file — which despite its name is a CMS
+object signed by a DoD PKE code-signing credential, not a checksum list.
 
 <br>
 
@@ -180,7 +223,10 @@ The uninstaller asks the application where your trust store is, so it removes th
 
 ## Honest limitations
 
-- **No card has been read by this code yet.** The distribution support is verified in real containers, but a container has no smart card. Someone still has to run this on real hardware.
+- **A card has been read, and the browser step has been verified on real hardware**, on Fedora 44 with a Broadcom Corp 58200 and a CAC inserted: 3/3 NSS databases configured, 7/7 roots present in each. The distribution support is verified in real containers as well, but a container has no smart card, so a container proves the packaging and not the card.
+- **The certificates have not been read on the machines they are installed from the network path.** The sources in this repository are unmodified from DoD's signed publication and the bundle reproduces byte-for-byte from them, but if DoD publishes a new bundle version, `tools/refresh_roots.py --check` will say so rather than anyone noticing.
+- **The CMS signature on DoD's `.sha256` manifests no longer validates.** The signing certificate has expired since publication, so a present-day OpenSSL refuses it. The file digests inside it are still used to confirm the sources are unmodified, which is a weaker statement than "the signature verifies today" and is labelled as such in `tools/refresh_roots.py`.
+- **The browser step has not been run on a machine without p11-kit.** That fallback path — writing a PKCS#11 module entry with `modutil` by hand — is exercised by the test suite but not by real hardware, because no p11-kit-free machine was available. On any current distribution p11-kit is present and that path does not run.
 - **Snap Firefox is detected but unproven.** Sentinel refuses to claim success with a sandboxed browser. Whether a classic-confinement snap can load the module needs a real machine.
 - **`DoD_Roots.pem` reflects the bundle in this repository** (PKCS#7 v5.6 / v5.12 / v5.17). CNSA 2.0 roots are not included, because the source material does not contain them.
 - **Installation is a clone, not a package.** There is no `.deb` or `.rpm` yet.

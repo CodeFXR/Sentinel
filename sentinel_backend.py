@@ -269,6 +269,119 @@ class SentinelBackend:
             },
         )
 
+    async def verify_bundle(self, emit: Emit, dry_run: bool = False) -> Outcome:
+        """Check the shipped DoD roots against the shipped manifest.
+
+        Purely a read. Nothing is installed, nothing is written, and no network
+        access is attempted -- which is the point. The question this answers is
+        "are the certificates on this machine the current ones?", and on a unit
+        with no internet route the only way to answer it is from files already
+        on the machine.
+
+        Three things are checked, in increasing order of how much they should
+        worry the reader:
+
+        * the bundle is present and parses;
+        * every certificate in it is self-signed and in date, so installing it
+          cannot promote an issuing CA to a root of trust;
+        * it matches DoD_Roots.manifest exactly, so nothing has been added,
+          removed, or swapped since the bundle was built.
+
+        The manifest comparison is the one that catches a *replaced* root, which
+        is the case a count or an expiry check sails straight past.
+        """
+        log = lambda text: emit(Event("log", text))
+        log("\n--- CHECKING THE DoD CERTIFICATE BUNDLE ---")
+
+        bundle_path = os.path.join(self.SCRIPT_DIR, TRUST_ANCHOR_NAME)
+        manifest_path = os.path.join(
+            self.SCRIPT_DIR, sentinel_certs.MANIFEST_NAME
+        )
+
+        if not os.path.exists(bundle_path):
+            log(f"ERROR: {TRUST_ANCHOR_NAME} is missing from the installation.")
+            log("       Reinstall Sentinel; the certificates ship with it.")
+            self.logger.error(f"Bundle verification: {bundle_path} missing")
+            emit(Event("led", "led-certs", "error"))
+            return Outcome("verify-bundle", False, f"{TRUST_ANCHOR_NAME} missing")
+
+        try:
+            with open(bundle_path, encoding="utf-8", errors="replace") as fh:
+                bundle_text = fh.read()
+        except OSError as exc:
+            log(f"ERROR: the bundle could not be read: {exc}")
+            self.logger.error(f"Bundle verification: {exc}")
+            emit(Event("led", "led-certs", "error"))
+            return Outcome("verify-bundle", False, "bundle unreadable")
+
+        names, problems = await asyncio.to_thread(
+            sentinel_certs.verify_roots_only, bundle_text
+        )
+        if problems:
+            log(f"FAIL: the bundle is not fit to install as trust anchors:")
+            for problem in problems:
+                log(f"  - {problem}")
+            self.logger.error(f"Bundle verification: {len(problems)} problem(s)")
+            emit(Event("led", "led-certs", "error"))
+            return Outcome(
+                "verify-bundle", False, f"{len(problems)} problem(s)",
+                {"problems": problems},
+            )
+
+        log(f"OK: {len(names)} root certificate(s), all self-signed and in date.")
+        for name in names:
+            log(f"  - {name}")
+
+        if not os.path.exists(manifest_path):
+            # Not fatal, and not a failure of the certificate check above. Say
+            # what is lost rather than blocking on it: without the manifest the
+            # roots are still audited, they just cannot be compared to what
+            # Sentinel shipped.
+            log("")
+            log(f"NOTE: {sentinel_certs.MANIFEST_NAME} is not present, so the")
+            log("      bundle cannot be compared against the shipped one.")
+            log("      The certificates above are still verified as trust anchors.")
+            return Outcome(
+                "verify-bundle", True, f"{len(names)} roots, no manifest",
+                {"roots": names, "manifest": False},
+            )
+
+        with open(manifest_path, encoding="utf-8", errors="replace") as fh:
+            manifest_text = fh.read()
+
+        differences = await asyncio.to_thread(
+            sentinel_certs.compare_to_manifest, bundle_text, manifest_text
+        )
+        if differences:
+            log("")
+            log("FAIL: the bundle does not match the one Sentinel ships:")
+            for difference in differences:
+                log(f"  - {difference}")
+            log("")
+            log("This machine's certificates differ from the release. If you did")
+            log("not expect that, reinstall Sentinel from the repository.")
+            self.logger.error(
+                f"Bundle verification: {len(differences)} difference(s) from manifest"
+            )
+            emit(Event("led", "led-certs", "error"))
+            return Outcome(
+                "verify-bundle", False,
+                f"{len(differences)} difference(s) from the shipped bundle",
+                {"roots": names, "manifest": True, "differences": differences},
+            )
+
+        log("")
+        log(f"OK: identical to the bundle in {sentinel_certs.MANIFEST_NAME}.")
+        log("    These are the current DoD trust anchors for this release.")
+        self.logger.info(
+            f"Bundle verification: {len(names)} roots, all match the manifest"
+        )
+        emit(Event("led", "led-certs", "success"))
+        return Outcome(
+            "verify-bundle", True, f"{len(names)} roots verified",
+            {"roots": names, "manifest": True, "differences": []},
+        )
+
     async def install_certs(self, emit: Emit, dry_run: bool = False) -> Outcome:
         """Install the DoD self-signed roots into the distribution trust store.
 

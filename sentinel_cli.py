@@ -2,6 +2,7 @@
 
     sentinel check                 probe the smart-card stack
     sentinel install-certs         install the DoD self-signed roots (needs pkexec)
+    sentinel verify-bundle         check the shipped DoD roots against the manifest
     sentinel configure-browsers    register the PKCS#11 module in every NSS database
     sentinel fix-opensc            restrict OpenSC to the PIV/CAC drivers
     sentinel uninstall-certs       remove the trust anchors Sentinel installed
@@ -52,11 +53,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "action",
-        choices=("setup", "doctor", "all", "uninstall-certs", *ACTIONS),
+        choices=("setup", "doctor", "all", "uninstall-certs", "verify-bundle", *ACTIONS),
         help=(
-            "setup    configure everything in order and say whether it worked\n"
-            "doctor   explain, in plain language, why the card is not seen\n"
-            "all      every action, machine-readable summary only"
+            "setup         configure everything in order, say whether it worked\n"
+            "doctor        explain, in plain language, why the card is not seen\n"
+            "all           every action, machine-readable summary only\n"
+            "verify-bundle check the shipped DoD roots against the manifest;\n"
+            "              read-only and needs no network"
         ),
         metavar="ACTION",
     )
@@ -123,6 +126,8 @@ async def dispatch(backend: SentinelBackend, action: str, dry_run: bool) -> list
         return [await backend.check_services(_print, dry_run)]
     if action == "install-certs":
         return [await backend.install_certs(_print, dry_run)]
+    if action == "verify-bundle":
+        return [await backend.verify_bundle(_print, dry_run)]
     if action == "configure-browsers":
         return [await backend.configure_browsers(_print, dry_run)]
     if action == "fix-opensc":
