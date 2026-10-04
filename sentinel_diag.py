@@ -268,7 +268,12 @@ def diagnose() -> list[Finding]:
         findings.append(Finding(
             "problem", "The smart card service (pcscd) is not running.",
             "Nothing else can work until it is.",
-            "sudo systemctl enable --now pcscd",
+            # Deliberately not a sudo command. The tool can start this service
+            # itself through the same password prompt it uses for everything
+            # else, so telling the user to open a terminal and run it is handing
+            # back a job Sentinel is already equipped to do. "Run 'sentinel
+            # check'" is the action that actually fixes it.
+            "run 'sentinel check' -- it will start it for you",
         ))
 
     readers, queried = usb_readers()

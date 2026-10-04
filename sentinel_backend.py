@@ -49,6 +49,15 @@ NSS_TIMEOUT = 10.0
 
 MODULE_NAME = "DoD CAC"
 
+# How many DoD trust anchors the shipped bundle holds. Used to check that a
+# browser's trust store received all of them rather than a few.
+#
+# Kept as a constant rather than counted from the bundle at runtime so that a
+# truncated or tampered bundle cannot quietly lower the bar it is checked
+# against. `test_bundle.py` asserts it matches the committed DoD_Roots.pem, so
+# the two cannot drift.
+EXPECTED_ROOTS = 7
+
 # The name p11-kit registers itself under in an NSS database. Not the same as
 # the library filename: NSS stores the module as "p11-kit-proxy" and the file it
 # loads as "p11-kit-proxy.so", and only the former is the module's identity.
@@ -184,30 +193,98 @@ class SentinelBackend:
         emit(Event("led", "led-opensc", "loading"))
 
         # 1. The daemon.
-        if await platform_mod.service_is_active(self.platform.service):
-            log("OK: pcscd is active.")
+        #
+        # Two separate facts, checked separately: is it running now, and will it
+        # start again after a reboot. The old code asked only the first and then
+        # remedied only the first -- `systemctl start` -- while telling the user
+        # to run `systemctl enable --now` by hand. That is how a user ends up
+        # being asked to do a job the tool had already been given a password for,
+        # and how a card reader silently stops working after the next reboot.
+        #
+        # So: do both, and say plainly when there is nothing to do.
+        service = self.platform.service
+        active = await platform_mod.service_is_active(service)
+        enabled = await platform_mod.service_is_enabled(service)
+        # Whether the daemon is usable when this step finishes. Re-read at the
+        # end rather than tracked by hand through the branches, so a path added
+        # later cannot forget to set it.
+        service_ok = False
+
+        if active and enabled:
+            log(f"OK: {service} is running and set to start at boot.")
             emit(Event("led", "led-service", "success"))
-            self.logger.info("PCSC Service: Active")
-        else:
-            log(f"WARN: {self.platform.service} is not active.")
+            self.logger.info(f"PCSC Service: Active and enabled")
+            service_ok = True
+        elif active:
+            # Running, but it will not survive a reboot. Worth fixing quietly
+            # rather than shouting, because the card works right now.
+            log(f"OK: {service} is running, but is not set to start at boot.")
+            log("     It will stop after the next restart. Fixing that now.")
             if dry_run:
-                log(f"DRY RUN: would run: pkexec systemctl start {self.platform.service}")
+                log(f"DRY RUN: would run: pkexec systemctl enable {service}")
                 emit(Event("led", "led-service", "idle"))
             elif not self._pkexec_prefix(emit):
                 emit(Event("led", "led-service", "error"))
             else:
                 rc, _, err = await run(
-                    ["pkexec", "systemctl", "start", self.platform.service],
+                    ["pkexec", "systemctl", "enable", service],
                     timeout=POLKIT_TIMEOUT,
                 )
-                if rc == 0 and await platform_mod.service_is_active(self.platform.service):
-                    log(f"SUCCESS: {self.platform.service} started.")
+                if rc == 0 and await platform_mod.service_is_enabled(service):
+                    log(f"SUCCESS: {service} is now set to start at boot.")
                     emit(Event("led", "led-service", "success"))
-                    self.logger.info("PCSC Service: Started successfully")
+                    self.logger.info(f"PCSC Service: enabled at boot")
+                    service_ok = True
+                else:
+                    # A command that exits 0 but leaves the state unchanged is
+                    # not a failure with no reason -- it is a different thing,
+                    # and printing "exit 0" as the reason is the kind of
+                    # sentence that teaches a user to ignore the line.
+                    if rc == 0:
+                        reason = (
+                            "systemd accepted the command but the unit is still "
+                            f"not set to start at boot (it reports "
+                            f"'{await platform_mod._systemctl_state('is-enabled', service, 5.0) or 'unknown'}')"
+                        )
+                    else:
+                        reason = err.strip() or f"exit {rc}"
+                    log(f"WARNING: {service} will not start by itself: {reason}")
+                    log("         It is running now, so your card works today.")
+                    log("         After a restart, run this once:")
+                    log(f"           sudo systemctl enable {service}")
+                    # Usable right now, which is what this step measures. The
+                    # reboot problem is reported but is not a failure of the
+                    # card being usable today.
+                    emit(Event("led", "led-service", "success"))
+                    service_ok = True
+                    self.logger.warning(f"PCSC Service: {reason}")
+        else:
+            log(f"WARN: {service} is not running.")
+            if dry_run:
+                log(f"DRY RUN: would run: pkexec systemctl enable --now {service}")
+                emit(Event("led", "led-service", "idle"))
+            elif not self._pkexec_prefix(emit):
+                emit(Event("led", "led-service", "error"))
+            else:
+                rc, _, err = await run(
+                    ["pkexec", "systemctl", "enable", "--now", service],
+                    timeout=POLKIT_TIMEOUT,
+                )
+                if (rc == 0
+                        and await platform_mod.service_is_active(service)
+                        and await platform_mod.service_is_enabled(service)):
+                    log(f"SUCCESS: {service} started and set to start at boot.")
+                    emit(Event("led", "led-service", "success"))
+                    self.logger.info(
+                        f"PCSC Service: started and enabled successfully"
+                    )
+                    service_ok = True
                 else:
                     reason = err.strip() or f"exit {rc}"
-                    log(f"ERROR: could not start {self.platform.service}: {reason}")
-                    log(f"Manual fix: sudo systemctl enable --now {self.platform.service}")
+                    log(f"ERROR: could not start {service}: {reason}")
+                    log(f"       If the password prompt did not appear, run this")
+                    log(f"       yourself, once:")
+                    log(f"         sudo systemctl enable --now {service}")
                     emit(Event("led", "led-service", "error"))
                     self.logger.error(f"PCSC Service: failed to start: {reason}")
 
@@ -260,12 +337,32 @@ class SentinelBackend:
 
         return Outcome(
             action="check",
-            ok=not missing,
-            detail="stack probed",
+            # The service counts. This used to be `not missing` alone, so a
+            # daemon that could not be started produced ok=True -- the LED went
+            # red, the console said ERROR, and the setup verdict, which decides
+            # "works / not ready" from this flag, reported the machine as fine.
+            # A tool whose verdict reads one field and whose LEDs read another
+            # will eventually be believed over its own lights.
+            #
+            # Except in a dry run, where an unfixed condition is a finding about
+            # the system rather than a failure of the run. That is the rule the
+            # rest of the module already follows -- "discovering that there is
+            # nothing to do is a finding, not a failure" -- and it also keeps the
+            # exit status a statement about this invocation rather than about
+            # the machine it happened to run on.
+            ok=not missing and (service_ok or dry_run),
+            detail=(
+                "stack probed"
+                if service_ok or dry_run
+                else f"{service} is not running"
+            ),
             data={
                 "platform": self.platform.name,
                 "missing_tools": missing,
                 "supported": self.platform.supported,
+                "service_active": active,
+                "service_enabled": enabled,
+                "service_ok": service_ok,
             },
         )
 
@@ -673,9 +770,16 @@ class SentinelBackend:
                 # reported to the user as a success, in the one message they were
                 # most likely to believe.
                 if reason:
-                    log(f"  -> card module ready, but: {reason}")
+                    log(f"  -> roots written, but: {reason}")
                 else:
-                    log("  -> verified: card module available and roots imported.")
+                    log("  -> verified: card reachable and all DoD roots present.")
+                # Worth showing, worth failing over: not. See _p11_kit_registered.
+                if p11_kit and modutil:
+                    present, _ = await self._p11_kit_registered(modutil, db_path)
+                    if not present:
+                        log("     Note: this browser keeps no p11-kit entry of its own.")
+                        log("     That is normal for Chrome and Chromium, which use the")
+                        log("     system p11-kit directly. Nothing to do.")
                 succeeded.append(db_path)
             else:
                 log(f"  -> FAILED: {reason}")
@@ -756,7 +860,33 @@ class SentinelBackend:
         registration, which NSS rejects.
 
         Either way the result is verified by reading the database back, not by
-        trusting an exit code. Returns (ok, reason); reason is empty on success.
+        `register_module=False` is the p11-kit case, and the important property
+        of that branch is what it does *not* require.
+
+        An earlier version demanded that `p11-kit-proxy.so` be registered inside
+        the browser's own NSS database, and treated its absence as a failure. On a
+        Zorin OS 18.1 laptop that reported a working configuration as broken:
+
+            p11-kit present: True; card visible to p11-kit: True
+            p11-kit-proxy is not registered in this browser's database
+
+        The check was simply wrong. Chromium on Linux does not reach a smart card
+        through an entry in its own `~/.pki/nssdb`; it goes through the system
+        p11-kit client library, so no such entry is ever written. Firefox on some
+        builds does keep one. Requiring it is asking for a file that the program
+        in question does not use.
+
+        It was also harmful in a second way: this function returned before the
+        certificate import, so a false failure meant the DoD roots were never
+        added to the browser at all.
+
+        So the p11-kit branch no longer inspects the database for a module. What
+        p11-kit exposes system-wide is the authority on whether the card is
+        reachable, and that was measured once, before this loop, in
+        `configure_browsers`. The only work left here is importing the roots,
+        which is done unconditionally and verified.
+
+        Returns (ok, reason); reason is empty on success.
         """
         try:
             if register_module:
@@ -764,10 +894,6 @@ class SentinelBackend:
                     modutil, lib_path, db_path
                 )
                 if not module_ok:
-                    return False, reason
-            else:
-                present, reason = await self._p11_kit_registered(modutil, db_path)
-                if not present:
                     return False, reason
 
             imported, import_reason = 0, ""
@@ -790,10 +916,15 @@ class SentinelBackend:
                 )
                 if rc != 0 or MODULE_NAME not in stdout:
                     return False, "module absent after write"
-            else:
-                present, reason = await self._p11_kit_registered(modutil, db_path)
-                if not present:
-                    return False, f"p11-kit proxy not usable after write: {reason}"
+            elif certutil and have_bundle:
+                # On the p11-kit path the module needs no database entry, so the
+                # roots are the only thing that can be verified -- and they are
+                # what a CAC site actually depends on.
+                if not await self._roots_present(certutil, db_path):
+                    return False, (
+                        "the DoD roots are still not in this browser's trust "
+                        "store after writing them"
+                    )
             return True, import_reason
         except Exception as exc:  # defensive: one bad profile must not stop the rest
             return False, str(exc)
@@ -883,25 +1014,37 @@ class SentinelBackend:
         safe = re.sub(r"[^A-Za-z0-9 ._-]", "", name).strip() or "DoD Root"
         return f"{safe} [{index + 1}]" if safe else f"DoD Root {index + 1}"
 
+    async def _roots_present(self, certutil, db_path) -> bool:
+        """True when the DoD roots are actually in this browser's trust store.
+
+        Read back from the database rather than inferred from certutil's exit
+        code, because certutil reports a failed import on a partially successful
+        run and because the count is the thing that matters: a browser holding
+        one of seven roots fails in a way that looks like a server problem.
+        """
+        rc, stdout, _ = await run(
+            [certutil, "-d", f"sql:{db_path}", "-L"], timeout=NSS_TIMEOUT,
+        )
+        if rc != 0:
+            return False
+        return stdout.count("C,,") >= EXPECTED_ROOTS
+
     async def _p11_kit_registered(self, modutil, db_path) -> tuple[bool, str]:
-        """Is p11-kit-proxy registered and loaded in this database?
+        """Is p11-kit-proxy registered in this database? Informational only.
 
-        That is the state that means "this browser can reach the card". If p11-kit
-        is installed system-wide but the proxy is somehow missing from the
-        browser's own database, the browser still cannot see the card, so this
-        is checked rather than assumed from p11-kit being installed.
+        Not a pass/fail gate any more, and the docstring says why, because the
+        previous version of this was the bug reported from Zorin OS.
 
-        The whole module list has to be read and searched, rather than asking
-        `modutil -list <name>`. p11-kit registers itself as an NSS *security
-        module*, which NSS stores in secmod.db, not in the pkcs11.txt that
-        `modutil -add` writes. `modutil -list p11-kit-proxy` therefore answers
-        "not found in database" for a database where the proxy is present and
-        loaded -- which is every working browser on a p11-kit system. Asking the
-        wrong question here reported a perfectly good browser as broken.
+        A browser on a p11-kit system may or may not keep a `p11-kit-proxy`
+        entry in its own NSS database, and neither case says anything about
+        whether it can reach the card: Chromium does not use that entry at all,
+        going to the system p11-kit client library instead. The answerable
+        question is what p11-kit exposes system-wide, which `configure_browsers`
+        asks once via `p11_kit_exposes_card`.
 
-        Both the name and `status: loaded` are required. A registered-but-not
-        loaded proxy is exactly the failure the original module existed to catch,
-        so its absence of a loaded status has to be treated as a failure.
+        Kept because the answer is worth showing: on a machine where it is
+        absent, a user who then removes p11-kit will find the browser can no
+        longer reach the card, and nothing else would have told them.
         """
         if not modutil:
             return False, "modutil is not installed, so the database cannot be checked"

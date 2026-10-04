@@ -45,6 +45,24 @@ ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 # newline must not be able to forge an extra log line.
 CONTROL_RE = re.compile(r"[\x00-\x08\x0B-\x1F\x7F\r\n\t]")
 
+# The animation pcsc_scan draws between events: a single character cycling
+# through - \ | / , each on its own carriage-return-terminated segment. It is
+# repainted continuously, so passing it through fills the Scan tab with a
+# scrolling blur and buries the reader events it is there to show.
+SPINNER_RE = re.compile(r"^[-\\|/ ]+$")
+
+
+def _is_spinner(segment: str) -> bool:
+    """True for pcsc_scan's progress animation, False for anything with content.
+
+    Deliberately narrow: a line qualifies only if every character is a spinner
+    glyph or whitespace, so a reader name or a status message that merely
+    *contains* a dash is still shown. An earlier version of the scan filter
+    matched on substrings and discarded real output.
+    """
+    stripped = segment.strip()
+    return bool(stripped) and bool(SPINNER_RE.match(stripped))
+
 LOGO_ASCII = r"""
      ____         __  _          __
     / __/__ ___  / /_(_)__  ___ / /
@@ -418,33 +436,53 @@ class SentinelApp(App):
     async def read_scan_stream(self, proc) -> None:
         """Pass pcsc_scan output through, and drive the card LED from it.
 
-        The previous version filtered against a hardcoded list of string
-        prefixes guessed at another program's output format, which discarded
-        nearly everything real pcsc_scan emits. The only rule applied here is
-        that a line is a line; duplicate consecutive lines are collapsed so a
-        chatty reader does not flood the widget.
+        pcsc_scan is a terminal program that redraws in place. Measured on
+        pcsc-lite 1.7.0, six seconds of output was 608 bytes containing 61
+        carriage returns and only 10 newlines -- the event lines end with `\r`
+        because the program is overwriting a status line, not appending a log.
+
+        The previous version used `proc.stdout.readline()`, which splits on
+        `\n` only. That blocked on every event line until a newline eventually
+        arrived, and when one did the whole redraw history came back as a single
+        line. The visible result was a Scan tab that stayed empty, which is what
+        was reported. The card LED was driven from the same stream, so it never
+        moved either.
+
+        So the stream is split on both terminators, and the spinner that pcsc_scan
+        draws between events is dropped rather than shown. The dedupe of
+        consecutive identical lines stays: a reader that repaints the same status
+        repeatedly should not fill the widget.
         """
         last = None
+        buffer = ""
         try:
             while True:
-                raw = await proc.stdout.readline()
-                if not raw:
+                chunk = await proc.stdout.read(256)
+                if not chunk:
                     break
-                line = ANSI_RE.sub("", raw.decode(errors="replace")).rstrip()
-                if not line or line == last:
-                    continue
-                last = line
-                self.write_scan(line)
+                buffer += chunk.decode(errors="replace")
+                # Split on the terminator pcsc_scan actually uses as well as the
+                # one readline() would have. `+ "\r"` flushes a trailing partial
+                # segment on every pass, so an event is never held back waiting
+                # for a newline that is not coming.
+                segments = re.split(r"[\r\n]+", buffer)
+                buffer = segments.pop()
+                for segment in segments:
+                    line = ANSI_RE.sub("", segment).rstrip()
+                    if not line or line == last or _is_spinner(line):
+                        continue
+                    last = line
+                    self.write_scan(line)
 
-                # Card transitions, matched loosely because the wording varies
-                # across pcsc-lite versions.
-                lowered = line.lower()
-                if "card inserted" in lowered or "card detected" in lowered:
-                    self.set_led("led-card", "success")
-                    self.logger.info("Hardware: card inserted")
-                elif "card removed" in lowered or "card removed" in lowered:
-                    self.set_led("led-card", "idle")
-                    self.logger.info("Hardware: card removed")
+                    # Card transitions, matched loosely because the wording varies
+                    # across pcsc-lite versions.
+                    lowered = line.lower()
+                    if "card inserted" in lowered or "card detected" in lowered:
+                        self.set_led("led-card", "success")
+                        self.logger.info("Hardware: card inserted")
+                    elif "card removed" in lowered or "card reset" in lowered:
+                        self.set_led("led-card", "idle")
+                        self.logger.info("Hardware: card removed")
         except asyncio.CancelledError:
             pass
         except (OSError, ValueError):
