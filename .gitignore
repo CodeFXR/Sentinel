@@ -10,6 +10,22 @@ venv/
 sentinel.log
 sentinel.log.*
 
+# Full-chain PEMs from the DoD source bundles. Deliberately not published.
+#
+# These contain issuing CAs and intermediates, not just roots. Shipping them
+# next to DoD_Roots.pem in a public repository invites exactly the mistake this
+# project exists to prevent: someone installs a "DoD certificate file" and
+# promotes a retired issuing CA to a root of trust, at which point that CA can
+# validate a certificate directly.
+#
+# None of them are covered by the signed `.sha256` manifest DoD ships in the
+# same directory, so excluding them costs nothing in verifiability -- and
+# `tools/refresh_roots.py --verify-sources` still checks every file that is.
+DoD_Full_Chain.pem
+DoD_Full_Chain_v5_17.pem
+DoD_PKE_CA_chain.pem
+dod_pke_chain.pem
+
 # Written by the installer: records the tag this checkout is pinned to
 .sentinel-ref
 
