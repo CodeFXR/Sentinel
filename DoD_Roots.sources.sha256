@@ -1,0 +1,56 @@
+# Sentinel source bundles -- digests of the files tools/refresh_roots.py uses.
+#
+# Why this file exists, and why it is the authority rather than the CMS
+# signature DoD ships alongside the bundles.
+#
+# Each bundle contains a <bundle>.sha256 file which, despite the name, is a CMS
+# SignedData object: its payload is a list of SHA-256 digests, signed by a DoD
+# PKE code-signing credential chaining to DoD Root CA 3.
+#
+# A present-day OpenSSL cannot validate that signature, for two independent
+# reasons, both verified rather than assumed:
+#
+#   * the legacy digestAlgorithms field advertises SHA-1, which OpenSSL 3
+#     refuses: "evp_pkey_ctx_set_md: invalid digest" (exit 4);
+#   * with a SHA-256 path and the root supplied, it then fails on the signer
+#     itself: "certificate verify error: certificate has expired" -- the
+#     code-signing certificate expired after publication.
+#
+# openssl cms -verify -noverify still writes the payload in both cases. So the
+# digests can be read but not authenticated: editing one byte of a copied
+# signature file changes the digest list it yields, and openssl returns the
+# same exit code either way. A checker that trusts that payload is trusting a
+# file an attacker can edit.
+#
+# Two consequences, both deliberate:
+#
+#   * Codex's suggested fix -- reject when openssl returns nonzero -- is not
+#     usable, because the exit code is 4 for the genuine DoD files too. It would
+#     reject the publication and report the tool broken.
+#   * So the digests are pinned here instead, in git, where a change is a
+#     reviewable commit rather than a silent edit. refresh_roots.py verifies
+#     every file against this list AND cross-checks the CMS payload against it;
+#     a disagreement between the two is a hard failure.
+#
+# This makes the chain: git history -> this file -> the source files, with DoD's
+# signature as corroboration of what the digests were on the day.
+#
+# Regenerate with: tools/refresh_roots.py --write-sources
+
+0e23eee07c61b8f0ee3eeda714a2b727d51d00e4e9891271f31f790c63029177  Certificates_PKCS7_v5_17_WCF/README.txt
+1fbbb14581515d1d9be1a6e23dad1e8a78eb77d47ba561f1cd64996ce70de729  Certificates_PKCS7_v5.6_DoD/Certificates_PKCS7_v5.6_DoD.pem.p7b
+2852db60e37f842af9fe268ef014c0bab76557b5d5a48052efb26bdce41d1791  Certificates_PKCS7_v5.6_DoD/Certificates_PKCS7_v5.6_DoD_DoD_Root_CA_2.der.p7b
+354c37e0bdc14f1bfa6ce9d1cb796f07a0f2e30a9563a3e3a924c72a9d0e7bd9  Certificates_PKCS7_v5_17_WCF/Certificates_PKCS7_v5_17_WCF.pem.p7b
+6302a3d76e3dde0640331a5c3263dd28ec50f8f5426c2ea8e7c52349ce7cc3b1  certificates_pkcs7_v5_12_eca/README.txt
+7aeab8b48472f795ee7182b288cdcab2f0feafd20e09e1f5bfa81a898ab0d5a2  Certificates_PKCS7_v5_17_WCF/Certificates_PKCS7_v5_17_WCF_DoD_WCF_Root_CA_1.der.p7b
+7b38a98d884f1f4ad53f35b7fcc85e5e42d011b8d3d374f8952d187f1b6f87fe  Certificates_PKCS7_v5.6_DoD/README.txt
+837e63bdc6ff97f5dd552920c3b609492cf1ca7e1c6e71f3cfe840cbb0450651  certificates_pkcs7_v5_12_eca/certificates_pkcs7_v5_12_eca_ECA_Root_CA_5_der.p7b
+8a3fe6b1d3075bbbb5043d8d0a19d28f789a84eb02fbec253c24034ce3995248  certificates_pkcs7_v5_12_eca/certificates_pkcs7_v5_12_eca_ECA_Root_CA_4_der.p7b
+8fcd110df0ed4559191abbc71c4e8b5a42abee89ac4edd6fec232d92cf37e718  Certificates_PKCS7_v5.6_DoD/Certificates_PKCS7_v5.6_DoD.der.p7b
+906222cf5be186674c982325b25bfec37b963913ea7ee4b7f129617748f15fcb  Certificates_PKCS7_v5_17_WCF/Certificates_PKCS7_v5_17_WCF_DoD_WCF_Intermediate_CA_1.der.p7b
+940e56fee31008ad7501f95ae58ed5bb40cce94639b69fdbc3bb052a8a589fd2  Certificates_PKCS7_v5_17_WCF/Certificates_PKCS7_v5_17_WCF.der.p7b
+b779ac818d7c4a030892dc4adacbd6d4940f4635a25c6afa766abb3228324467  Certificates_PKCS7_v5.6_DoD/Certificates_PKCS7_v5.6_DoD_DoD_Root_CA_5.der.p7b
+e29c30f18198623d6a654d2beb8efa8236dd5d922316c2d4ccc4a524b313826d  certificates_pkcs7_v5_12_eca/dod_pke_chain.pem
+e7c9a554340414f02c68d7f036d9ddcc3b2dd5f02658ac78d1a06e6b98a9c342  Certificates_PKCS7_v5.6_DoD/Certificates_PKCS7_v5.6_DoD_DoD_Root_CA_3.der.p7b
+e96b5f32548fe37fc94ef38062baa57c6dfd3781df86ea92222dd934761b5048  Certificates_PKCS7_v5.6_DoD/Certificates_PKCS7_v5.6_DoD_DoD_Root_CA_4.der.p7b
+f56c67a1681910d103c0e70f00ebe888f8eda6fae36485f0b7d4d3ccb911decd  certificates_pkcs7_v5_12_eca/certificates_pkcs7_v5_12_eca_der.p7b

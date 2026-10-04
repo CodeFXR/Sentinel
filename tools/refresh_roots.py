@@ -161,98 +161,152 @@ def report(pem_text: str) -> None:
         print("\nAll self-signed and in date. Safe to install as trust anchors.")
 
 
-def verify_sources() -> int:
-    """Check the source files against the SHA-256 manifest DoD ships with them.
+SOURCE_DIGESTS = "DoD_Roots.sources.sha256"
 
-    Each bundle contains a `<bundle>.sha256` file which is not a checksum list
-    despite the name: it is a CMS SignedData object whose payload is a list of
-    SHA-256 digests, signed by a DoD PKE code-signing credential. The payload is
-    extracted and every listed file compared.
 
-    What this does *not* do is re-validate the CMS signature, and the reason is
-    worth stating rather than hiding: the signature chains to DoD Root CA 3, but
-    the signing certificate has since expired, so a present-day OpenSSL refuses
-    it. That is a statement about the age of the publication, not about its
-    integrity -- a signature made while the certificate was valid remains a
-    record of what was signed. The digests below are therefore trustworthy as a
-    record of the published contents, and this function confirms the files in
-    this repository still match that record exactly.
+def load_pinned_digests() -> dict:
+    """The committed digest of every source file, as `<sha256>  <path>`.
+
+    This is the trust anchor, not the CMS signature. See the header of the file
+    itself for why: openssl cannot validate DoD's signature with a current build
+    (SHA-1 in the legacy digest field, and the signer has since expired), yet it
+    still writes the payload, so the digests can be read but not authenticated.
+    Flipping one byte of a copied `.sha256` changes the digest list it yields and
+    openssl returns the same exit code either way, so anything that trusts the
+    payload alone trusts a file an attacker can edit.
+
+    Pinned in git, a change to it is a reviewable commit rather than a silent
+    edit. A checker that rejected on openssl's exit status instead would reject
+    the genuine publication too, because that status is 4 for the real files.
     """
+    path = os.path.join(ROOT, SOURCE_DIGESTS)
+    digests = {}
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(None, 1)
+            if len(parts) == 2:
+                digests[parts[1].strip()] = parts[0]
+    return digests
+
+
+def _cms_payload(signature: str) -> str:
+    """Extract the digest list from a bundle's CMS manifest.
+
+    Returns "" when nothing could be read. Never raises: an unreadable signature
+    is a finding for the caller to report, not an exception on a maintenance
+    path.
+    """
+    with tempfile.NamedTemporaryFile("r", suffix=".txt", delete=False) as fh:
+        target = fh.name
+    try:
+        subprocess.run(
+            ["openssl", "cms", "-verify", "-inform", "DER", "-in", signature,
+             "-noverify", "-out", target],
+            capture_output=True, text=True, timeout=60,
+        )
+        with open(target, encoding="utf-8", errors="replace") as out:
+            return out.read()
+    except OSError:
+        return ""
+    finally:
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
+
+
+def verify_sources() -> int:
+    """Check every source file against the committed digests, then against DoD.
+
+    Two independent checks, because neither is sufficient alone:
+
+    1. Each file is hashed and compared to `DoD_Roots.sources.sha256`, which is
+       in git. This is the check that can actually fail against a tampered file.
+    2. The CMS payload in each bundle's `.sha256` is extracted and compared to
+       the same list. DoD's signature cannot be validated by a current OpenSSL,
+       so this is corroboration rather than proof -- but a payload that
+       *disagrees* with the committed digests means someone edited one of the
+       two, and that is a hard failure either way.
+
+    Reporting the disagreement is the point. A checker that only looked at the
+    CMS payload would happily accept a source bundle whose digests had been
+    rewritten to match.
+    """
+    try:
+        pinned = load_pinned_digests()
+    except OSError as exc:
+        print(f"  FAILED  cannot read {SOURCE_DIGESTS}: {exc}")
+        return 1
+    if not pinned:
+        print(f"  FAILED  {SOURCE_DIGESTS} contains no digests")
+        return 1
+
     failures = 0
-    # One pass per source directory, not per source file: every per-root .p7b
-    # lives in the same bundle as its signed manifest, so iterating the file list
-    # would verify the same manifest seven times and print seven identical lines.
+    checked = mismatched = missing = 0
+    disagreements = []
+
+    for relative, want in sorted(pinned.items()):
+        target = os.path.join(ROOT, relative)
+        if not os.path.exists(target):
+            print(f"  ! missing  {relative}")
+            missing += 1
+            continue
+        with open(target, "rb") as blob:
+            got = hashlib.sha256(blob.read()).hexdigest()
+        if got == want:
+            checked += 1
+        else:
+            mismatched += 1
+            print(f"  ! altered  {relative}")
+            print(f"            committed {want}")
+            print(f"            on disk   {got}")
+
+    # Cross-check DoD's own digest list against the committed one.
     directories = []
     for relative in SOURCES:
         directory = os.path.dirname(os.path.join(ROOT, relative))
         if directory not in directories:
             directories.append(directory)
-
     for directory in directories:
         label = os.path.basename(directory)
-        if not os.path.isdir(directory):
-            print(f"  FAILED  {label}: the source directory is missing")
-            failures += 1
-            continue
         signatures = [f for f in os.listdir(directory) if f.endswith(".sha256")]
         if not signatures:
-            print(f"  FAILED  {label}: no .sha256 manifest present")
-            failures += 1
+            disagreements.append(f"{label}: no .sha256 manifest present")
             continue
-
-        signature = os.path.join(directory, signatures[0])
-        # The signature itself will not validate (the signing certificate has
-        # since expired), but the payload still extracts, so read it to a
-        # temporary file either way. The first call below is kept only to make
-        # the expected failure visible to anyone running this by hand.
-        probe = subprocess.run(
-            ["openssl", "cms", "-verify", "-inform", "DER", "-in", signature,
-             "-noverify", "-out", os.devnull],
-            capture_output=True, text=True, timeout=60,
-        )
-        with tempfile.NamedTemporaryFile("r+", suffix=".txt", delete=False) as fh:
-            manifest_path = fh.name
-        subprocess.run(
-            ["openssl", "cms", "-verify", "-inform", "DER", "-in", signature,
-             "-noverify", "-out", manifest_path],
-            capture_output=True, text=True, timeout=60,
-        )
-        if probe.returncode != 0 and not os.path.getsize(manifest_path):
-            print(f"  FAILED  {label}: could not read the signed manifest at all, "
-                  "so nothing here is verified")
-            os.unlink(manifest_path)
-            failures += 1
+        payload = _cms_payload(os.path.join(directory, signatures[0]))
+        if not payload:
+            disagreements.append(f"{label}: the signed manifest could not be read")
             continue
+        for line in payload.replace("\r", "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            signed_digest, name = parts[0], parts[1].strip()
+            committed = pinned.get(os.path.join(label, name))
+            if committed is None:
+                continue          # a file we do not use; not our business
+            if committed != signed_digest:
+                disagreements.append(
+                    f"{label}/{name}: DoD's manifest says {signed_digest[:16]}..., "
+                    f"this repository pins {committed[:16]}..."
+                )
 
-        checked = mismatched = missing = 0
-        with open(manifest_path, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                line = line.replace("\r", "").strip()
-                if not line:
-                    continue
-                parts = line.split(None, 1)
-                if len(parts) != 2:
-                    continue
-                want, name = parts[0], parts[1].strip()
-                target = os.path.join(directory, name)
-                if not os.path.exists(target):
-                    missing += 1
-                    continue
-                with open(target, "rb") as blob:
-                    got = hashlib.sha256(blob.read()).hexdigest()
-                if got == want:
-                    checked += 1
-                else:
-                    mismatched += 1
-                    print(f"  ! {name} does not match the signed digest")
-        os.unlink(manifest_path)
-
-        status = "OK" if not (mismatched or missing) else "FAILED"
-        print(f"  {status}  {label}: "
-              f"{checked} file(s) match DoD's signed manifest"
-              + (f", {mismatched} mismatched, {missing} missing" if (mismatched or missing) else ""))
-        if mismatched or missing:
-            failures += 1
+    print(f"  {'OK' if not (mismatched or missing) else 'FAILED'}  "
+          f"{checked}/{len(pinned)} file(s) match the committed digests"
+          + (f", {mismatched} altered, {missing} missing"
+             if (mismatched or missing) else ""))
+    if disagreements:
+        print("  FAILED  DoD's signed manifests disagree with this repository:")
+        for line in disagreements:
+            print(f"            - {line}")
+    if mismatched or missing or disagreements:
+        failures += 1
 
     return failures
 
@@ -263,6 +317,61 @@ DESCRIPTION = (
     "match the sources; --write regenerates them; --verify-sources confirms the "
     "sources are unmodified from DoD's signed publication."
 )
+
+
+def write_source_digests() -> int:
+    """Regenerate DoD_Roots.sources.sha256 from the bundles as they are now.
+
+    Deliberately does not consult the CMS payload. The file being written is the
+    independent record the payload is checked against, so seeding it from the
+    payload would make the cross-check vacuous -- the two could never disagree,
+    and the whole point would be lost.
+    """
+    import importlib
+    header = importlib.import_module("sentinel_certs")
+
+    # Only files DoD actually signed, and only ones this repository publishes.
+    # The full-chain PEMs are deliberately not published -- they hold issuing CAs
+    # and intermediates, and sit next to a trust-anchor bundle in a public
+    # repository -- and pinning them here would quietly put them back.
+    covered = set()
+    for directory in sorted({
+        os.path.dirname(os.path.join(ROOT, relative)) for relative in SOURCES
+    }):
+        label = os.path.basename(directory)
+        signatures = [f for f in os.listdir(directory) if f.endswith(".sha256")]
+        if not signatures:
+            continue
+        payload = _cms_payload(os.path.join(directory, signatures[0]))
+        for line in payload.replace("\r", "").splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2:
+                covered.add(os.path.join(label, parts[1].strip()))
+
+    rows = []
+    for relative in sorted(covered):
+        path = os.path.join(ROOT, relative)
+        if not os.path.isfile(path):
+            continue
+        with open(path, "rb") as blob:
+            rows.append(f"{hashlib.sha256(blob.read()).hexdigest()}  {relative}")
+    if not rows:
+        print("  FAILED  no source files found")
+        return 1
+
+    path = os.path.join(ROOT, SOURCE_DIGESTS)
+    existing_header = []
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                existing_header.append(line)
+                if not line.startswith("#"):
+                    break
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.writelines(existing_header or [f"# Sentinel source digests.\n"])
+        fh.write("\n".join(sorted(rows)) + "\n")
+    print(f"  Wrote {len(rows)} digest(s) to {SOURCE_DIGESTS}.")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -282,9 +391,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     group.add_argument(
         "--verify-sources", action="store_true",
-        help="check the source bundles against DoD's signed SHA-256 manifests",
+        help="check the source bundles against the committed digests, and "
+             "cross-check DoD's signed manifests against them",
+    )
+    group.add_argument(
+        "--write-sources", action="store_true",
+        help="regenerate DoD_Roots.sources.sha256 from the bundles as they are "
+             "now; review the diff before committing",
     )
     args = parser.parse_args(argv)
+
+    if args.write_sources:
+        # Rewrites the trust anchor, so it prints loudly and refuses to pretend
+        # this is routine. The point of the file is that a change to it is a
+        # reviewable commit; regenerating it silently would remove that.
+        print("Rewriting the committed source digests from the files as they are now.")
+        print("This is the trust anchor for --verify-sources. Read the diff before")
+        print("committing it, and confirm the sources really did change upstream.")
+        print()
+        return write_source_digests()
 
     if args.verify_sources:
         print("Checking source bundles against DoD's signed manifests:")
