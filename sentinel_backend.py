@@ -633,24 +633,41 @@ class SentinelBackend:
         # module registration below is needed at all.
         p11_kit = platform_mod.p11_kit_present()
         card_present, card_detail = platform_mod.p11_kit_exposes_card()
+        # The proxy rather than opensc-pkcs11.so. It brokers OpenSC and anything
+        # else the administrator has configured, and it survives an OpenSC
+        # upgrade -- registering the OpenSC library directly writes a path into
+        # the profile that a package upgrade can delete, which is the same
+        # fragility this project already fixed for Chromium.
+        proxy_path = platform_mod.find_p11_kit_proxy() if p11_kit else None
         self.logger.info(
             f"p11-kit present: {p11_kit}; card visible to p11-kit: {card_present} "
-            f"({card_detail})"
+            f"({card_detail}); proxy: {proxy_path or 'not found'}"
         )
 
         if p11_kit:
-            # Scoped, because the previous wording was a claim about every
-            # browser made from one host-wide measurement. A snap or Flatpak
-            # browser cannot see the host's p11-kit at all, so "browsers reach
-            # the card through it already" was false for exactly the browser a
-            # user is most likely to be staring at -- and it was printed on the
-            # same run that then showed that browser as sandboxed, which is a
-            # self-contradiction nobody would act on.
+            # Correct, and the reason it is stated per browser rather than
+            # globally is the subject of this whole branch.
+            #
+            # Chromium and Chrome reach the card through the system p11-kit
+            # client library, so they need no module entry. Firefox does not:
+            # neither Firefox nor NSS contains a single reference to p11-kit, and
+            # both read their module list from the profile's secmod.db. A Firefox
+            # profile with no entry there has no card module at all, and the
+            # browser will never offer a certificate no matter how healthy the
+            # host's p11-kit is.
+            #
+            # An earlier version of this printed "Browsers reach the card
+            # through it already" from one host-wide measurement and registered
+            # nothing. That was true for Chromium and false for Firefox, and the
+            # field report that followed -- a browser that never prompts -- was
+            # that bug, not a missing card.
             log("PKCS#11 access: p11-kit is exposing a CAC to the host.")
-            log("              Browsers that are not sandboxed use it directly,")
-            log("              so Sentinel will not register OpenSC a second time.")
-            log("              A sandboxed browser cannot: it is cut off from the")
-            log("              host entirely, including p11-kit and pcscd.")
+            log("              Chrome and Chromium use it directly and need no")
+            log("              module entry of their own.")
+            log("              Firefox does not: it keeps its module list in the")
+            log("              profile, so the card module is registered below.")
+            if proxy_path:
+                log(f"              Registering: {proxy_path}")
         else:
             log("PKCS#11 access: p11-kit is not installed, so the OpenSC module")
             log("              has to be registered in each browser by hand.")
@@ -767,28 +784,46 @@ class SentinelBackend:
 
             log(f"Updating: {db_path}...")
             self.logger.info(f"Browser config: {db_path}")
+            # Firefox keeps its PKCS#11 module list inside the profile, so it
+            # needs one registered. Chromium uses the system p11-kit directly
+            # and does not. Decided per database, because that is the only place
+            # the browser family is knowable.
+            firefox = sentinel_browser.is_firefox_profile(db_path)
+            # Without p11-kit the OpenSC library is the only option for either
+            # family; with it, Firefox gets the proxy and Chromium gets nothing.
+            if p11_kit:
+                module_lib = proxy_path if firefox else None
+            else:
+                module_lib = lib_path
+            if firefox and not module_lib:
+                log("  -> SKIP: no PKCS#11 module library found to register.")
+                reason = "no PKCS#11 module library was found on this system"
+                self.logger.error(f"Browser config {db_path}: {reason}")
+                failed.append({"database": db_path, "error": reason})
+                continue
+
             ok, reason = await self._configure_one(
-                modutil, certutil, lib_path, bundle, db_path, have_bundle,
-                register_module=not p11_kit,
+                modutil, certutil, module_lib, bundle, db_path, have_bundle,
+                register_module=bool(module_lib),
             )
             if ok:
                 # The reason is not decoration. `_configure_one` reports a partial
                 # result by returning ok=True with a reason, and the old code
                 # printed "roots imported" on the strength of ok alone -- so a
                 # certificate import that had failed in every single run was
-                # reported to the user as a success, in the one message they were
+                # reported to the user as a success, in the one line they were
                 # most likely to believe.
                 if reason:
                     log(f"  -> roots written, but: {reason}")
+                elif module_lib:
+                    log("  -> verified: card module loaded, reader attached, "
+                        "all DoD roots present.")
                 else:
-                    log("  -> verified: all DoD roots present.")
-                # Worth showing, worth failing over: not. See _p11_kit_registered.
-                if p11_kit and modutil:
-                    present, _ = await self._p11_kit_registered(modutil, db_path)
-                    if not present:
-                        log("     Note: this browser keeps no p11-kit entry of its own.")
-                        log("     That is normal for Chrome and Chromium, which use the")
-                        log("     system p11-kit directly. Nothing to do.")
+                    # Chromium keeps no module entry, so claiming a card module
+                    # was loaded would be asserting something that did not happen.
+                    # It reaches the card through the system p11-kit instead.
+                    log("  -> verified: all DoD roots present. This browser uses the")
+                    log("     system p11-kit directly, so it has no module of its own.")
                 # A Firefox profile also has to be told to *offer* the card.
                 # Roots in the trust store only let the browser validate the
                 # server; whether it asks the user to pick a client certificate
@@ -796,8 +831,7 @@ class SentinelBackend:
                 # one itself. A CAC site asking for a client certificate then
                 # gets nothing, and the symptom -- a site that never prompts --
                 # is indistinguishable from a card that cannot be read.
-                if os.path.isfile(os.path.join(db_path, "cert9.db")) and \
-                        not db_path.endswith(os.path.join(".pki", "nssdb")):
+                if firefox:
                     asked, why = sentinel_browser.set_firefox_asks_every_time(db_path)
                     if asked:
                         log("     Set to ask which certificate to use on every request.")
@@ -981,18 +1015,15 @@ class SentinelBackend:
                         f"Browser config {db_path}: {import_reason}"
                     )
 
-            # Verify by reading back rather than trusting the exit code.
-            if register_module:
-                rc, stdout, _ = await run(
-                    [modutil, "-dbdir", f"sql:{db_path}", "-list", MODULE_NAME],
-                    timeout=NSS_TIMEOUT,
-                )
-                if rc != 0 or MODULE_NAME not in stdout:
-                    return False, "module absent after write"
-            elif certutil and have_bundle:
-                # On the p11-kit path the module needs no database entry, so the
-                # roots are the only thing that can be verified -- and they are
-                # what a CAC site actually depends on.
+            # `_register_module` already read the database back and proved the
+            # module is loaded and attached to a reader, so there is nothing
+            # left to check on that path. A second verification here used the
+            # name-filtered `modutil -list` form, which omits the `status:` line
+            # entirely and therefore reported "module absent after write" on a
+            # database where the module was present, loaded and working.
+            if not register_module and certutil and have_bundle:
+                # No module entry is needed, so the roots are the only thing that
+                # can be verified -- and they are what a CAC site depends on.
                 if not await self._roots_present(certutil, db_path):
                     return False, (
                         "the DoD roots are still not in this browser's trust "
@@ -1102,68 +1133,122 @@ class SentinelBackend:
             return False
         return stdout.count("C,,") >= EXPECTED_ROOTS
 
-    async def _p11_kit_registered(self, modutil, db_path) -> tuple[bool, str]:
-        """Is p11-kit-proxy registered in this database? Informational only.
+    async def _register_module(self, modutil, lib_path, db_path) -> tuple[bool, str]:
+        """Register a PKCS#11 module in one NSS database and prove it loaded.
 
-        Not a pass/fail gate any more, and the docstring says why, because the
-        previous version of this was the bug reported from Zorin OS.
+        This is the step that makes a smart card visible to Firefox, and it is
+        the step an earlier version of this removed. Firefox and NSS contain no
+        reference to p11-kit -- both enumerate `SECMOD_GetDefaultModuleList()`
+        and add with `SECMOD_AddNewModule()` -- so a profile with no entry has
+        no card module at all. Measured on an empty profile: zero modules beyond
+        NSS's internal one, so nothing could ever prompt for a certificate.
 
-        A browser on a p11-kit system may or may not keep a `p11-kit-proxy`
-        entry in its own NSS database, and neither case says anything about
-        whether it can reach the card: Chromium does not use that entry at all,
-        going to the system p11-kit client library instead. The answerable
-        question is what p11-kit exposes system-wide, which `configure_browsers`
-        asks once via `p11_kit_exposes_card`.
+        Verification is deliberately stronger than "the name appears in the
+        listing". Three things must hold, because the first two have both been
+        observed to pass on a database that cannot read a card:
 
-        Kept because the answer is worth showing: on a machine where it is
-        absent, a user who then removes p11-kit will find the browser can no
-        longer reach the card, and nothing else would have told them.
+        1. the module is present in this database;
+        2. its status is `loaded` -- a registered-but-unloaded entry is dead
+           weight that looks fine in a listing;
+        3. it reports at least one attached slot -- proof it actually initialised
+           and is talking to the reader, rather than being a line of text.
+
+        (3) is the one that distinguishes a working configuration from a
+        well-formed file, and it is the lesson of this whole exercise: every
+        check that passed on paper while the thing did not work was one that
+        asked whether a record existed rather than whether it functioned.
         """
         if not modutil:
-            return False, "modutil is not installed, so the database cannot be checked"
-        rc, stdout, _ = await run(
-            [modutil, "-dbdir", f"sql:{db_path}", "-list"],
-            timeout=NSS_TIMEOUT,
-        )
-        if rc != 0:
-            return False, f"the database could not be read (modutil exit {rc})"
-        if P11_KIT_MODULE_NAME not in stdout:
-            return False, (
-                f"{P11_KIT_MODULE_NAME} is not registered in this browser's "
-                "database, so the browser cannot reach the card through p11-kit"
-            )
-        # Confirm it is the entry that is loaded, not merely mentioned: the name
-        # also appears on the `library name:` line of the same block.
-        for block in _module_blocks(stdout):
-            if P11_KIT_MODULE_NAME in block and "status: loaded" in block:
-                return True, ""
-        return False, (
-            f"{P11_KIT_MODULE_NAME} is registered but not loaded, so the browser "
-            "cannot use it; restarting p11-kit or the browser usually fixes this"
-        )
+            return False, "modutil is not installed, so no module can be registered"
+        if not lib_path:
+            return False, "no PKCS#11 module library was found to register"
 
-    async def _register_module(self, modutil, lib_path, db_path) -> tuple[bool, str]:
-        """Write an OpenSC module entry into one database, the pre-p11-kit way.
-
-        Kept because it is still the only option on a machine with no p11-kit,
-        and because it is the fix for a browser whose proxy entry is broken.
-        """
         rc, stdout, _ = await run(
             [modutil, "-dbdir", f"sql:{db_path}", "-list", MODULE_NAME],
             timeout=NSS_TIMEOUT,
         )
-        already_ok = rc == 0 and MODULE_NAME in stdout and lib_path in stdout
-        if already_ok:
-            return True, ""
+        if rc == 0 and MODULE_NAME in stdout and lib_path in stdout:
+            loaded, reason = await self._module_works(modutil, db_path)
+            if loaded:
+                return True, ""
 
-        rc, _, err = await run(
+        add_rc, _, add_err = await run(
             [modutil, "-force", "-dbdir", f"sql:{db_path}",
              "-add", MODULE_NAME, "-libfile", lib_path],
             timeout=NSS_TIMEOUT,
         )
-        if rc != 0:
-            return False, _explain_add_failure(err, stdout)
-        return True, ""
+
+        # Read the database back and judge that, not the exit code.
+        #
+        # `modutil -add` can exit nonzero and still have done the job. Observed on
+        # a working setup: it returned 22 with "Failure to load dynamic library"
+        # while the module it had just written was in the database, loaded, and
+        # exposing the reader -- and `-add` on the same profile a moment later
+        # said the same thing. Refusing on a nonzero status would have left
+        # Firefox with no card module on a machine where the card worked.
+        #
+        # The exit status is still reported when the readback disagrees, because
+        # that is when its text is the only clue available.
+        loaded, reason = await self._module_works(modutil, db_path)
+        if loaded:
+            if add_rc != 0:
+                self.logger.info(
+                    f"Browser config {db_path}: modutil -add exited {add_rc} "
+                    f"({add_err.strip()}) but the module is registered and "
+                    "attached, so the outcome is correct"
+                )
+            return True, ""
+
+        if add_rc != 0:
+            # Name the consequence first and the cause second. "Failure to load
+            # dynamic library" is what modutil said and tells a person nothing
+            # about what to do; the readback reason says the browser has no card
+            # module at all, which is the thing they have to fix.
+            return False, f"{reason} (modutil -add: {add_err.strip() or f'exit {add_rc}'})"
+        return False, reason
+
+    async def _module_works(self, modutil, db_path) -> tuple[bool, str]:
+        """Is the registered module loaded *and* talking to a reader?
+
+        Answers "can this browser reach a card", not "does a file contain a
+        name". A module that loads but exposes no slot is the state you get when
+        pcscd is not running, and it is the difference between a browser that
+        prompts and one that silently never will.
+        """
+        # The *full* listing, not `modutil -list <name>`. The two formats differ
+        # and the difference matters: asking for one module by name returns a
+        # plain description with no `status:` line at all, so a check for it can
+        # never pass. The full listing has the numbered per-module blocks with
+        # the status, and that is what `_module_blocks` parses.
+        rc, stdout, _ = await run(
+            [modutil, "-dbdir", f"sql:{db_path}", "-list"],
+            timeout=NSS_TIMEOUT,
+        )
+        if rc != 0 or MODULE_NAME not in stdout:
+            return False, (
+                f"{MODULE_NAME} is not in this browser's database, so the browser "
+                "has no card module and can never offer a certificate"
+            )
+        for block in _module_blocks(stdout):
+            if MODULE_NAME not in block:
+                continue
+            if "status: loaded" not in block:
+                return False, (
+                    f"{MODULE_NAME} is registered but not loaded. Unload it and run "
+                    "this again; a stale entry is the usual cause."
+                )
+            # Case-insensitive: the block writes " slots:" and " slot:", and a
+            # strict comparison against a lowercase "slot:" silently reports a
+            # working module as having no reader.
+            lowered = block.lower()
+            if "slot:" not in lowered:
+                return False, (
+                    f"{MODULE_NAME} loaded but is not attached to any reader. The "
+                    "card reader may not be plugged in, or pcscd may not be "
+                    "running -- run 'sentinel doctor'."
+                )
+            return True, ""
+        return False, f"{MODULE_NAME} could not be read back from the database"
 
     async def diagnose_browser(self, emit: Emit, dry_run: bool = False) -> Outcome:
         """Answer the only question that matters: will this browser offer my card?
@@ -1179,7 +1264,13 @@ class SentinelBackend:
            the host's p11-kit or its pcscd, whatever the host can see.
         3. The browser has a profile Sentinel can see. A browser that has never
            been started has none, and was never configured.
-        4. Firefox is set to ask which certificate to use. Left at the default it
+        4. **Firefox has a loaded card module in that profile.** This is the
+           one that was missing, and it is why a browser could be fully
+           configured -- roots imported, green light -- and still never prompt.
+           Firefox keeps its PKCS#11 module list in the profile's secmod.db and
+           has no p11-kit awareness whatsoever, so no entry means no card, and
+           the symptom is a site that silently never asks.
+        5. Firefox is set to ask which certificate to use. Left at the default it
            picks one itself, and a CAC site that never prompts looks exactly
            like a card that cannot be read.
 
@@ -1211,6 +1302,14 @@ class SentinelBackend:
         log("2. Browsers found:")
         if not browsers:
             log("     (none that Sentinel recognises)")
+            # Codex's point on #5, and it is right: reporting success here told a
+            # user their browser would offer a card when there was no browser at
+            # all. The host's p11-kit can see a CAC perfectly well on a machine
+            # with no browser installed, and that is the case this was missing.
+            problems.append(
+                "No browser that Sentinel recognises is installed. Install Firefox "
+                "or Chrome from your distribution's software centre."
+            )
         for browser in browsers:
             if browser.confined:
                 verdict = "SANDBOXED -- cannot reach the card"
@@ -1247,22 +1346,42 @@ class SentinelBackend:
         profiles = [
             path for browser in browsers
             for path in browser.nss_databases
-            if os.path.basename(os.path.dirname(path)) in ("firefox",)
-            or "firefox" in path
+            if sentinel_browser.is_firefox_profile(path)
         ]
         log("")
-        log("4. Firefox set to ask which certificate to use:")
         if not profiles:
+            log("4. Firefox card module loaded, and Firefox asks which")
+            log("   certificate to use:")
             log("     (no Firefox profile found)")
+        modutil = shutil.which("modutil")
         for profile in profiles:
-            if sentinel_browser.firefox_asks_every_time(profile):
-                log(f"     - {os.path.basename(profile)}: YES")
+            name = os.path.basename(profile)
+            # The check that matters most, and the one that was absent.
+            if modutil:
+                loaded, why = await self._module_works(modutil, profile)
+                if loaded:
+                    log(f"4. {name}: card module loaded and attached to a reader")
+                else:
+                    log(f"4. {name}: card module NOT usable -- {why}")
+                    problems.append(
+                        f"Firefox profile {name} has no working card module. {why} "
+                        "Run CONFIG BROWSERS to register it."
+                    )
             else:
-                log(f"     - {os.path.basename(profile)}: NO")
+                log(f"4. {name}: could not check, modutil is not installed")
                 problems.append(
-                    f"Firefox profile {os.path.basename(profile)} is not set to "
-                    "'Ask me every time'. Run CONFIG BROWSERS to set it, or set it "
-                    "in Preferences > Privacy & Security > Certificates."
+                    "modutil is not installed, so the Firefox card module cannot "
+                    "be checked or registered. It comes from the libnss3-tools "
+                    "package on Debian and Ubuntu."
+                )
+            if sentinel_browser.firefox_asks_every_time(profile):
+                log(f"     {name}: asks which certificate to use: YES")
+            else:
+                log(f"     {name}: asks which certificate to use: NO")
+                problems.append(
+                    f"Firefox profile {name} is not set to 'Ask me every time'. Run "
+                    "CONFIG BROWSERS to set it, or set it in Preferences > "
+                    "Privacy & Security > Certificates."
                 )
 
         log("")
@@ -1490,10 +1609,11 @@ def _explain_add_failure(stderr: str, stdout: str = "") -> str:
             "there is nothing to add -- the browser can reach the card as it is. "
             "See the p11-kit line in the output above."
         )
-    if "cannot open shared object file" in combined:
+    if "cannot open shared object file" in combined or "Failure to load dynamic library" in combined:
         return (
-            "the OpenSC PKCS#11 module could not be opened. OpenSC is probably "
-            "not installed; run the install step, or check the module path."
+            "the PKCS#11 module could not be opened. Check that OpenSC and p11-kit "
+            "are installed, and that the library path still exists -- a package "
+            "upgrade can delete a versioned path."
         )
     if "already exists" in combined or "already in use" in combined:
         return "a module with that name is already registered under a different path."

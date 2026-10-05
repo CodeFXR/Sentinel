@@ -127,7 +127,12 @@ still does nothing. It answers that question by name rather than with a light:
    p11-kit or its `pcscd`, whatever the host can see,
 3. does the browser have a profile — one that has never been started has none,
    and was never configured,
-4. is Firefox set to *ask* which certificate to use, or is it picking one itself.
+4. **is Firefox's card module loaded and attached to a reader.** This is the
+   one that was missing, and it is why a browser could be fully configured --
+   roots imported, green light -- and still never prompt. Firefox keeps its
+   PKCS#11 module list inside the profile and has no p11-kit awareness at all,
+   so no entry means no card.
+5. is Firefox set to *ask* which certificate to use, or is it picking one itself.
 
 Read-only: no writes, no privileges, no network.
 

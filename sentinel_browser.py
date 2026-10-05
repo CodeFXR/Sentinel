@@ -211,6 +211,39 @@ def chromium_databases() -> list[str]:
     return [path]
 
 
+def is_firefox_profile(path: str) -> bool:
+    """True when this NSS database belongs to a Firefox profile.
+
+    The distinction decides whether a PKCS#11 module has to be registered in it,
+    which is the whole difference between the two browser families:
+
+    * **Firefox** reads its module list from the profile's secmod.db. Neither
+      Firefox nor NSS contains a single reference to p11-kit -- checked against
+      `security/manager/ssl/PKCS11ModuleDB.cpp` and NSS's own `nssinit.c`, both
+      of which use `SECMOD_GetDefaultModuleList()` / `SECMOD_AddNewModule()` and
+      mention p11-kit zero times. So a profile with no entry has no card module
+      at all, and the browser can never offer a certificate, however healthy the
+      host's p11-kit is. This is what the "Load" button in Preferences > Privacy
+      & Security > Security Devices writes.
+
+    * **Chromium and Chrome** reach the card through the system p11-kit client
+      library and keep no module entry of their own. Registering one is at best
+      redundant.
+
+    Getting this backwards is not a cosmetic difference. A previous version of
+    Sentinel applied the Chromium rule to every browser because a field report
+    came from a Chromium-only machine, and Firefox on that machine then had no
+    way to read a card at all.
+    """
+    normalised = path.replace(os.sep, "/")
+    return (
+        "/.mozilla/firefox/" in normalised
+        or "/snap/firefox/" in normalised
+        or "/.var/app/org.mozilla.firefox/" in normalised.lower()
+        or "/.var/app/org.mozilla.firefox" in normalised
+    )
+
+
 # Browsers a user is likely to launch, and the binary that proves each is
 # installed. Used to notice a browser that Sentinel never configured, which is
 # the state a false green hides: the tool writes the one database it found and

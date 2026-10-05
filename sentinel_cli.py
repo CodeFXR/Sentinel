@@ -266,6 +266,21 @@ def _run_browser_doctor_mode(backend, args, platform) -> int:
     The command to run when the setup says green and the browser still does
     nothing. Read-only: no writes, no privileges, no network.
     """
+    # Under --json, nothing but the JSON may reach stdout, or a pipeline that
+    # pipes this into jq gets a banner and a report in front of the document and
+    # fails. The other sub-modes already redirect the human output; this one
+    # printed its banner and its findings before appending the JSON, so the
+    # documented global --json did not apply here.
+    if args.json:
+        import contextlib
+        import io
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            outcome = asyncio.run(backend.diagnose_browser(_print, args.dry_run))
+        print(json.dumps(outcome.to_dict(), indent=2, sort_keys=True))
+        return 0 if outcome.ok else 1
+
     print(f"Sentinel {VERSION} — will your browser offer your CAC?")
     print()
     outcome = asyncio.run(backend.diagnose_browser(_print, args.dry_run))
@@ -277,8 +292,6 @@ def _run_browser_doctor_mode(backend, args, platform) -> int:
         print(f"  No — {len(outcome.data.get('problems', []))} thing(s) to fix,")
         print("  listed above in the order they matter.")
     print("=" * 60)
-    if args.json:
-        print(json.dumps(outcome.to_dict(), indent=2, sort_keys=True))
     return 0 if outcome.ok else 1
 
 
