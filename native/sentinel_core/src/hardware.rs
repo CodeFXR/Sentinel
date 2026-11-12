@@ -180,6 +180,32 @@ impl PyNativePcscStatus {
     }
 }
 
+#[pyclass]
+#[derive(Clone, Debug, Default)]
+pub struct PyPivCardMetadata {
+    #[pyo3(get)]
+    pub card_name: Option<String>,
+    #[pyo3(get)]
+    pub token_label: Option<String>,
+    #[pyo3(get)]
+    pub token_serial: Option<String>,
+}
+
+#[pymethods]
+impl PyPivCardMetadata {
+    #[new]
+    fn new(card_name: Option<String>, token_label: Option<String>, token_serial: Option<String>) -> Self {
+        Self { card_name, token_label, token_serial }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<PivCardMetadata card_name={:?} token_label={:?} token_serial={:?}>",
+            self.card_name, self.token_label, self.token_serial
+        )
+    }
+}
+
 /// Query hardware status directly via PC/SC Lite C API without subprocesses.
 pub fn query_native_pcsc_status() -> PyNativePcscStatus {
     let symbols = match PcscSymbols::try_load() {
@@ -528,6 +554,263 @@ fn read_piv_container_data(
     }
 }
 
+/// Parse Cardholder Unique Identifier (CHUID Tag 0x5FC102) payload.
+/// Extracts (serial_or_guid, expiration_date).
+pub fn parse_chuid_metadata(payload: &[u8]) -> (Option<String>, Option<String>) {
+    if payload.is_empty() {
+        return (None, None);
+    }
+
+    let mut guid_opt = None;
+    let mut fascn_opt = None;
+    let mut exp_opt = None;
+
+    let mut idx = 0;
+    // Skip outer 0x53 wrapper if present
+    if payload.len() > 2 && payload[0] == 0x53 {
+        if payload[1] < 0x80 {
+            idx = 2;
+        } else if payload[1] == 0x81 && payload.len() > 3 {
+            idx = 3;
+        } else if payload[1] == 0x82 && payload.len() > 4 {
+            idx = 4;
+        }
+    }
+
+    while idx < payload.len() {
+        let tag = payload[idx];
+        idx += 1;
+        if tag == 0x00 || tag == 0xFF {
+            continue;
+        }
+        if idx >= payload.len() {
+            break;
+        }
+        let len = if payload[idx] < 0x80 {
+            let l = payload[idx] as usize;
+            idx += 1;
+            l
+        } else if payload[idx] == 0x81 && idx + 1 < payload.len() {
+            let l = payload[idx + 1] as usize;
+            idx += 2;
+            l
+        } else if payload[idx] == 0x82 && idx + 2 < payload.len() {
+            let l = ((payload[idx + 1] as usize) << 8) | (payload[idx + 2] as usize);
+            idx += 3;
+            l
+        } else {
+            break;
+        };
+
+        if idx + len > payload.len() {
+            break;
+        }
+
+        let val = &payload[idx..idx + len];
+        idx += len;
+
+        if tag == 0xEE && len == 16 {
+            // RFC 4122 formatted 128-bit UUID/GUID
+            guid_opt = Some(format!(
+                "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
+                val[8], val[9], val[10], val[11], val[12], val[13], val[14], val[15]
+            ));
+        } else if tag == 0x30 && len >= 10 {
+            let hex_str: String = val.iter().map(|b| format!("{:02X}", b)).collect();
+            fascn_opt = Some(hex_str);
+        } else if tag == 0x35 && len == 8 {
+            if let Ok(s) = std::str::from_utf8(val) {
+                exp_opt = Some(s.to_string());
+            }
+        }
+    }
+
+    let serial = guid_opt.or(fascn_opt);
+    (serial, exp_opt)
+}
+
+/// Parse Card Capability Container (CCC Tag 0x5FC107) payload.
+/// Extracts the Card Identifier (Tag 0xF0) if present.
+pub fn parse_ccc_metadata(payload: &[u8]) -> Option<String> {
+    if payload.is_empty() {
+        return None;
+    }
+    let mut idx = 0;
+    if payload.len() > 2 && payload[0] == 0x53 {
+        if payload[1] < 0x80 {
+            idx = 2;
+        } else if payload[1] == 0x81 && payload.len() > 3 {
+            idx = 3;
+        } else if payload[1] == 0x82 && payload.len() > 4 {
+            idx = 4;
+        }
+    }
+    while idx < payload.len() {
+        let tag = payload[idx];
+        idx += 1;
+        if tag == 0x00 || tag == 0xFF {
+            continue;
+        }
+        if idx >= payload.len() {
+            break;
+        }
+        let len = if payload[idx] < 0x80 {
+            let l = payload[idx] as usize;
+            idx += 1;
+            l
+        } else if payload[idx] == 0x81 && idx + 1 < payload.len() {
+            let l = payload[idx + 1] as usize;
+            idx += 2;
+            l
+        } else if payload[idx] == 0x82 && idx + 2 < payload.len() {
+            let l = ((payload[idx + 1] as usize) << 8) | (payload[idx + 2] as usize);
+            idx += 3;
+            l
+        } else {
+            break;
+        };
+
+        if idx + len > payload.len() {
+            break;
+        }
+
+        let val = &payload[idx..idx + len];
+        idx += len;
+
+        if tag == 0xF0 && !val.is_empty() {
+            return Some(val.iter().map(|b| format!("{:02X}", b)).collect());
+        }
+    }
+    None
+}
+
+/// Reads smart card metadata (CHUID / CCC) directly via NIST SP 800-73-4 APDU containers.
+pub fn read_piv_card_metadata_native(reader_opt: Option<&str>) -> PyPivCardMetadata {
+    let symbols = match PcscSymbols::try_load() {
+        Some(s) => s,
+        None => return PyPivCardMetadata::default(),
+    };
+
+    let (connect_fn, disconnect_fn, transmit_fn) = match (symbols.connect, symbols.disconnect, symbols.transmit) {
+        (Some(c), Some(d), Some(t)) => (c, d, t),
+        _ => return PyPivCardMetadata::default(),
+    };
+
+    let mut context: i64 = 0;
+    let rc = unsafe {
+        (symbols.establish_context)(
+            SCARD_SCOPE_SYSTEM,
+            std::ptr::null(),
+            std::ptr::null(),
+            &mut context,
+        )
+    };
+
+    let context = if rc == SCARD_S_SUCCESS {
+        context
+    } else {
+        let rc_user = unsafe {
+            (symbols.establish_context)(
+                SCARD_SCOPE_USER,
+                std::ptr::null(),
+                std::ptr::null(),
+                &mut context,
+            )
+        };
+        if rc_user != SCARD_S_SUCCESS {
+            return PyPivCardMetadata::default();
+        }
+        context
+    };
+
+    let target_reader = match resolve_target_reader(&symbols, context, reader_opt) {
+        Some(r) => r,
+        None => {
+            unsafe { (symbols.release_context)(context); }
+            return PyPivCardMetadata::default();
+        }
+    };
+
+    let c_reader = match CString::new(target_reader.as_str()) {
+        Ok(c) => c,
+        Err(_) => {
+            unsafe { (symbols.release_context)(context); }
+            return PyPivCardMetadata::default();
+        }
+    };
+
+    let mut h_card: i64 = 0;
+    let mut active_proto: usize = 0;
+    let conn_rc = unsafe {
+        connect_fn(
+            context,
+            c_reader.as_ptr(),
+            SCARD_SHARE_SHARED,
+            SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1,
+            &mut h_card,
+            &mut active_proto,
+        )
+    };
+
+    if conn_rc != SCARD_S_SUCCESS {
+        unsafe { (symbols.release_context)(context); }
+        return PyPivCardMetadata::default();
+    }
+
+    let in_tx = if let Some(begin_fn) = symbols.begin_transaction {
+        unsafe { begin_fn(h_card) == SCARD_S_SUCCESS }
+    } else {
+        false
+    };
+
+    if !select_piv_applet(transmit_fn, h_card, active_proto) {
+        unsafe {
+            if in_tx {
+                if let Some(end_fn) = symbols.end_transaction {
+                    let _ = end_fn(h_card, SCARD_LEAVE_CARD);
+                }
+            }
+            disconnect_fn(h_card, SCARD_LEAVE_CARD);
+            (symbols.release_context)(context);
+        }
+        return PyPivCardMetadata::default();
+    }
+
+    let (serial, _exp) = if let Some(chuid_data) = read_piv_container_data(transmit_fn, h_card, active_proto, [0x5F, 0xC1, 0x02]) {
+        parse_chuid_metadata(&chuid_data)
+    } else {
+        (None, None)
+    };
+
+    let ccc_id = if let Some(ccc_data) = read_piv_container_data(transmit_fn, h_card, active_proto, [0x5F, 0xC1, 0x07]) {
+        parse_ccc_metadata(&ccc_data)
+    } else {
+        None
+    };
+
+    unsafe {
+        if in_tx {
+            if let Some(end_fn) = symbols.end_transaction {
+                let _ = end_fn(h_card, SCARD_LEAVE_CARD);
+            }
+        }
+        disconnect_fn(h_card, SCARD_LEAVE_CARD);
+        (symbols.release_context)(context);
+    }
+
+    let is_piv = serial.is_some() || ccc_id.is_some();
+    if is_piv {
+        PyPivCardMetadata {
+            card_name: Some("DoD Common Access Card (CAC / PIV)".to_string()),
+            token_label: Some("DoD Common Access Card".to_string()),
+            token_serial: serial,
+        }
+    } else {
+        PyPivCardMetadata::default()
+    }
+}
+
 /// Discovers and reads digital certificates from a physical smart card via direct in-process
 /// NIST SP 800-73-4 PIV APDUs, eliminating external pkcs15-tool or opensc subprocess dependencies.
 pub fn read_piv_certificates_native(reader_opt: Option<&str>) -> Vec<crate::cert::PyCardCertificate> {
@@ -626,12 +909,18 @@ pub fn read_piv_certificates_native(reader_opt: Option<&str>) -> Vec<crate::cert
     // PIV AID selected: Query standard NIST SP 800-73-4 certificate containers
     let targets = [
         ([0x5F, 0xC1, 0x05], "0005", "CAC ID / PIV Authentication", "DoD Web Logon, PIV Mutual Authentication"),
-        ([0x5F, 0xC1, 0x01], "0001", "PIV Authentication", "DoD Web Logon, PIV Mutual Authentication"),
+        ([0x5F, 0xC1, 0x0A], "0002", "CAC Email Signature", "S/MIME Digital Email Signing"),
+        ([0x5F, 0xC1, 0x0B], "0003", "CAC Email Encryption", "S/MIME Key Management and Decryption"),
+        ([0x5F, 0xC1, 0x01], "0004", "CAC Device Authentication", "Device / Card Authentication"),
+        // Legacy CAC transition containers fallback
         ([0x5F, 0xC1, 0x02], "0002", "CAC Email Signature", "S/MIME Digital Email Signing"),
         ([0x5F, 0xC1, 0x03], "0003", "CAC Email Encryption", "S/MIME Key Management and Decryption"),
     ];
 
     for (tag, id, label, usage) in targets {
+        if results.iter().any(|c: &crate::cert::PyCardCertificate| c.id == id) {
+            continue;
+        }
         if let Some(container_data) = read_piv_container_data(transmit_fn, h_card, active_proto, tag) {
             if let Some(der_bytes) = extract_cert_from_piv_container(&container_data) {
                 if let Ok(py_cert) = crate::cert::parse_der_or_pem_bytes(
@@ -640,7 +929,9 @@ pub fn read_piv_certificates_native(reader_opt: Option<&str>) -> Vec<crate::cert
                     usage.to_string(),
                     &der_bytes,
                 ) {
-                    results.push(py_cert);
+                    if !results.iter().any(|c: &crate::cert::PyCardCertificate| c.serial == py_cert.serial && !c.serial.is_empty()) {
+                        results.push(py_cert);
+                    }
                 }
             }
         }
@@ -1361,5 +1652,35 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn test_parse_chuid_and_ccc() {
+        // Synthetic CHUID with 16-byte UUID in tag 0xEE and expiration in tag 0x35
+        let mut chuid = vec![0x53, 0x1E]; // Tag 0x53 len 30
+        chuid.push(0xEE); // Tag UUID
+        chuid.push(0x10); // len 16
+        chuid.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10]);
+        chuid.push(0x35); // Tag expiration
+        chuid.push(0x08); // len 8
+        chuid.extend_from_slice(b"20300101");
+        chuid.push(0xFE); // EDC
+        chuid.push(0x00);
+
+        let (serial, exp) = parse_chuid_metadata(&chuid);
+        assert_eq!(serial.as_deref(), Some("01020304-0506-0708-090a-0b0c0d0e0f10"));
+        assert_eq!(exp.as_deref(), Some("20300101"));
+
+        // Synthetic CCC with card identifier in tag 0xF0
+        let mut ccc = vec![0x53, 0x06];
+        ccc.push(0xF0);
+        ccc.push(0x04);
+        ccc.extend_from_slice(&[0xA0, 0x00, 0x00, 0x03]);
+        let card_id = parse_ccc_metadata(&ccc);
+        assert_eq!(card_id.as_deref(), Some("A0000003"));
+
+        // Empty / truncated handling
+        assert_eq!(parse_chuid_metadata(&[]), (None, None));
+        assert_eq!(parse_ccc_metadata(&[]), None);
     }
 }

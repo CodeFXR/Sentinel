@@ -1,8 +1,8 @@
-"""Secure Release Update Checker and Archive Verifier for Sentinel CAC Manager.
+"""Secure Release Update Checker and Archive Verifier for Sentinel.
 
 Enforces fail-closed supply-chain security:
 - Transactional release installation and rollback with strict SHA-256 and HTTPS source verification
-- Strict HTTPS origin validation (github.com/CodeFXR/Sentinel-CAC-Manager)
+- Strict HTTPS origin validation (github.com/CodeFXR/Sentinel)
 - Strict semantic version tag validation (^v?\\d+\\.\\d+\\.\\d+$)
 - Mandatory SHA-256 digest verification before any archive staging
 - Tar-slip (CWE-22), hardlink, escaping symlink, and device member rejection during extraction
@@ -23,12 +23,14 @@ import urllib.request
 
 from core import __version__
 
-GITHUB_API_LATEST_URL = "https://api.github.com/repos/CodeFXR/Sentinel-CAC-Manager/releases/latest"
-ALLOWED_HTML_PREFIX = "https://github.com/CodeFXR/Sentinel-CAC-Manager/"
-ALLOWED_DOWNLOAD_PREFIX = "https://github.com/CodeFXR/Sentinel-CAC-Manager/releases/download/"
+GITHUB_API_LATEST_URL = "https://api.github.com/repos/CodeFXR/Sentinel/releases/latest"
+ALLOWED_HTML_PREFIX = "https://github.com/CodeFXR/Sentinel/"
+ALLOWED_DOWNLOAD_PREFIX = "https://github.com/CodeFXR/Sentinel/releases/download/"
+LEGACY_ALLOWED_HTML_PREFIX = "https://github.com/CodeFXR/Sentinel-CAC-Manager/"
+LEGACY_ALLOWED_DOWNLOAD_PREFIX = "https://github.com/CodeFXR/Sentinel-CAC-Manager/releases/download/"
 SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
-BODY_SHA256_RE = re.compile(r"\b([0-9a-fA-F]{64})\s+\*?Sentinel-CAC-Manager[^\s]*\.tar\.gz\b")
+BODY_SHA256_RE = re.compile(r"\b([0-9a-fA-F]{64})\s+\*?Sentinel(?:-CAC-Manager)?[^\s]*\.tar\.gz\b", re.IGNORECASE)
 MAX_ARCHIVE_BYTES = 50 * 1024 * 1024  # 50 MB ceiling
 
 
@@ -90,7 +92,7 @@ def check_for_updates(current_version: str = __version__, timeout: float = 5.0) 
         GITHUB_API_LATEST_URL,
         headers={
             "Accept": "application/vnd.github+json",
-            "User-Agent": f"Sentinel-CAC-Manager/{current_version}",
+            "User-Agent": f"Sentinel/{current_version}",
         },
         method="GET",
     )
@@ -154,15 +156,16 @@ def check_for_updates(current_version: str = __version__, timeout: float = 5.0) 
 
     latest_ver_str = f"{parsed_latest[0]}.{parsed_latest[1]}.{parsed_latest[2]}"
     html_url = str(data.get("html_url", "")).strip()
-    if not html_url.startswith(ALLOWED_HTML_PREFIX):
+    if not (html_url.startswith(ALLOWED_HTML_PREFIX) or html_url.startswith(LEGACY_ALLOWED_HTML_PREFIX)):
         html_url = f"{ALLOWED_HTML_PREFIX}releases/tag/{tag_name}"
 
     download_url = None
-    archive_name = "Sentinel-CAC-Manager.tar.gz"
+    archive_name = "Sentinel.tar.gz"
     for asset in data.get("assets") or []:
         name = str(asset.get("name", ""))
         url = str(asset.get("browser_download_url", ""))
-        if name.endswith(".tar.gz") and "Sentinel-CAC-Manager" in name and url.startswith(ALLOWED_DOWNLOAD_PREFIX):
+        valid_dl_prefix = url.startswith(ALLOWED_DOWNLOAD_PREFIX) or url.startswith(LEGACY_ALLOWED_DOWNLOAD_PREFIX)
+        if name.endswith(".tar.gz") and any(k in name for k in ("Sentinel", "sentinel")) and valid_dl_prefix:
             download_url = url
             archive_name = name
             break
@@ -311,7 +314,11 @@ def perform_update(
         _log(f"[UPDATER] {msg}")
         return False, msg
 
-    if not update_info.download_url or not update_info.download_url.startswith(ALLOWED_DOWNLOAD_PREFIX):
+    valid_dl = update_info.download_url and (
+        update_info.download_url.startswith(ALLOWED_DOWNLOAD_PREFIX)
+        or update_info.download_url.startswith(LEGACY_ALLOWED_DOWNLOAD_PREFIX)
+    )
+    if not valid_dl:
         msg = "Security policy: Refusing to download update from untrusted or missing asset URL."
         _log(f"[UPDATER] {msg}")
         return False, msg
@@ -330,7 +337,7 @@ def perform_update(
     _log(f"[UPDATER] Downloading {update_info.tag_name} from {update_info.download_url}...")
     req = urllib.request.Request(
         update_info.download_url,
-        headers={"User-Agent": f"Sentinel-CAC-Manager/{update_info.current_version}"},
+        headers={"User-Agent": f"Sentinel/{update_info.current_version}"},
         method="GET",
     )
     ctx = ssl.create_default_context()

@@ -4,7 +4,7 @@
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
   <vendor>CodeFXR</vendor>
-  <vendor_url>https://github.com/CodeFXR/Sentinel-CAC-Manager</vendor_url>
+  <vendor_url>https://github.com/CodeFXR/Sentinel</vendor_url>
   <action id="com.codefxr.sentinel.pkexec.run">
     <description>Configure DoD CAC System Trust and Middleware</description>
     <message>Authentication is required to configure DoD CAC certificates and smart card middleware</message>
@@ -12,7 +12,7 @@
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
-      <allow_active>auth_admin</allow_active>
+      <allow_active>auth_admin_keep</allow_active>
     </defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/sentinel/privileged_helper.py</annotate>
     <annotate key="org.freedesktop.policykit.exec.allow_gui">false</annotate>

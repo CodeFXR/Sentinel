@@ -1,0 +1,34 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release --manifest-path native/sentinel_core/Cargo.toml
+
+override_dh_auto_install:
+	mkdir -p debian/sentinel/usr/bin
+	mkdir -p debian/sentinel/usr/libexec/sentinel/core
+	mkdir -p debian/sentinel/usr/lib/sentinel/core
+	mkdir -p debian/sentinel/usr/share/sentinel/certificates
+	mkdir -p debian/sentinel/usr/share/applications
+	mkdir -p debian/sentinel/usr/share/icons/hicolor/256x256/apps
+	mkdir -p debian/sentinel/usr/share/polkit-1/actions
+
+	cp -a cli.py main.py core ui debian/sentinel/usr/lib/sentinel/
+	cp -a target/release/libsentinel_core.so debian/sentinel/usr/lib/sentinel/core/
+
+	install -m 0755 core/privileged_helper.py debian/sentinel/usr/libexec/sentinel/privileged_helper.py
+	cp -a core/ca_manifest.py core/ownership.py core/rust_bridge.py core/__init__.py debian/sentinel/usr/libexec/sentinel/core/
+	install -m 0755 target/release/libsentinel_core.so debian/sentinel/usr/libexec/sentinel/core/
+
+	cp -a certificates/* debian/sentinel/usr/share/sentinel/certificates/
+	install -m 0644 polkit/com.codefxr.sentinel.policy debian/sentinel/usr/share/polkit-1/actions/
+	install -m 0644 sentinel.desktop debian/sentinel/usr/share/applications/
+	install -m 0644 sentinel.png debian/sentinel/usr/share/icons/hicolor/256x256/apps/
+
+	printf '#!/bin/sh\nexec /usr/bin/python3 /usr/lib/sentinel/cli.py "$$@"\n' > debian/sentinel/usr/bin/sentinel
+	chmod 0755 debian/sentinel/usr/bin/sentinel
+
+	printf '#!/bin/sh\nexec /usr/bin/python3 /usr/lib/sentinel/main.py "$$@"\n' > debian/sentinel/usr/bin/sentinel-cac-manager
+	chmod 0755 debian/sentinel/usr/bin/sentinel-cac-manager

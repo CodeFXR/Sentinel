@@ -1,5 +1,9 @@
 """Smart Card Certificates View (ActivClient Certificate Explorer) for Sentinel v2."""
 
+import base64
+import logging
+import os
+import re
 import threading
 import gi
 
@@ -7,7 +11,9 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib
 
-from core.smartcard import SmartCardStatus, scan_smartcard, verify_cert_ocsp
+from core.smartcard import CardCertificate, SmartCardStatus, scan_smartcard, verify_cert_ocsp
+
+logger = logging.getLogger("sentinel.cards_view")
 
 
 class CardsView(Gtk.Box):
@@ -50,6 +56,20 @@ class CardsView(Gtk.Box):
         self.content_box.append(self.empty_status)
 
     def update_status(self, card_stat: SmartCardStatus):
+        new_fingerprint = (
+            card_stat.card_present,
+            card_stat.reader_name,
+            card_stat.atr,
+            card_stat.token_serial,
+            len(card_stat.certificates),
+            card_stat.pin_retries_remaining,
+            card_stat.pin_locked,
+        )
+        if getattr(self, "_current_fingerprint", None) == new_fingerprint:
+            # Card and status have not changed; avoid tearing down open expanders or active widgets
+            return
+        self._current_fingerprint = new_fingerprint
+
         # Clear previous widgets
         while True:
             child = self.content_box.get_first_child()
@@ -148,6 +168,14 @@ class CardsView(Gtk.Box):
                 sub_edipi = Adw.ActionRow(title="DoD ID Number (EDIPI)", subtitle=GLib.markup_escape_text(cert.edipi))
                 row.add_row(sub_edipi)
 
+            if getattr(cert, "upn", None):
+                sub_upn = Adw.ActionRow(title="User Principal Name (UPN)", subtitle=GLib.markup_escape_text(cert.upn))
+                row.add_row(sub_upn)
+
+            if getattr(cert, "aia_url", None):
+                sub_aia = Adw.ActionRow(title="CA Issuers (AIA)", subtitle=GLib.markup_escape_text(cert.aia_url))
+                row.add_row(sub_aia)
+
             sub_iss = Adw.ActionRow(title="Issuing Certificate Authority", subtitle=GLib.markup_escape_text(cert.issuer or "Unknown"))
             row.add_row(sub_iss)
 
@@ -203,9 +231,88 @@ class CardsView(Gtk.Box):
             sub_revoc.add_suffix(btn_ocsp)
             row.add_row(sub_revoc)
 
+            # Export Certificate Row
+            sub_export = Adw.ActionRow(
+                title="Certificate Export",
+                subtitle="Save certificate in PEM or DER format for external tools or signing",
+            )
+            btn_export = Gtk.Button(label="Export...")
+            btn_export.add_css_class("flat")
+            btn_export.set_valign(Gtk.Align.CENTER)
+
+            def make_export_handler(target_cert):
+                def on_export_click(_btn):
+                    self._export_certificate(target_cert)
+                return on_export_click
+
+            btn_export.connect("clicked", make_export_handler(cert))
+            sub_export.add_suffix(btn_export)
+            row.add_row(sub_export)
+
             certs_group.add(row)
 
         self.content_box.append(certs_group)
+
+    def _export_certificate(self, cert: CardCertificate):
+        if not cert.raw_der:
+            self.main_window.show_toast("Certificate raw data unavailable for export.")
+            return
+
+        clean_holder = re.sub(r"[^a-zA-Z0-9_-]", "_", cert.holder_name or "CAC").strip("_")
+        clean_label = re.sub(r"[^a-zA-Z0-9_-]", "_", cert.label or "Certificate").strip("_")
+        suggested_name = f"{clean_holder}_{clean_label}.pem"
+
+        b64 = base64.b64encode(cert.raw_der).decode("ascii")
+        lines = [b64[i : i + 64] for i in range(0, len(b64), 64)]
+        pem_content = "-----BEGIN CERTIFICATE-----\n" + "\n".join(lines) + "\n-----END CERTIFICATE-----\n"
+
+        def _write_cert(path: str):
+            try:
+                flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+                fd = os.open(path, flags, 0o644)
+                with open(fd, "wb") as f:
+                    if path.lower().endswith((".der", ".cer")):
+                        f.write(cert.raw_der)
+                    else:
+                        f.write(pem_content.encode("utf-8"))
+                self.main_window.show_toast(f"Exported {os.path.basename(path)}")
+                self.main_window.append_log(f"Exported certificate {cert.label} to {path}")
+            except Exception as e:
+                self.main_window.show_toast(f"Export failed: {e}")
+
+        if hasattr(Gtk, "FileDialog"):
+            dialog = Gtk.FileDialog()
+            dialog.set_title("Export Certificate")
+            dialog.set_initial_name(suggested_name)
+
+            def on_save_finish(_dlg, result):
+                try:
+                    gfile = dialog.save_finish(result)
+                    if gfile and gfile.get_path():
+                        _write_cert(gfile.get_path())
+                except Exception as e:
+                    logger.debug(f"File dialog save cancelled or failed: {e}")
+
+            dialog.save(self.main_window, None, on_save_finish)
+        else:
+            chooser = Gtk.FileChooserNative.new(
+                "Export Certificate",
+                self.main_window,
+                Gtk.FileChooserAction.SAVE,
+                "_Save",
+                "_Cancel",
+            )
+            chooser.set_current_name(suggested_name)
+
+            def on_native_response(dialog, response_id):
+                if response_id == Gtk.ResponseType.ACCEPT:
+                    path = chooser.get_file().get_path()
+                    if path:
+                        _write_cert(path)
+                chooser.destroy()
+
+            chooser.connect("response", on_native_response)
+            chooser.show()
 
     def _show_change_pin_dialog(self, card_stat: SmartCardStatus):
         fresh_stat = scan_smartcard(force_refresh=True)

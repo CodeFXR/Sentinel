@@ -21,7 +21,9 @@ from ui.system_view import SystemView
 from ui.diagnostics_view import DiagnosticsView
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel_cac_manager.png")
+ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel.png")
+if not os.path.isfile(ICON_PATH):
+    ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel_cac_manager.png")
 if not os.path.isfile(ICON_PATH):
     ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel_icon_v2.png")
 CSS_PATH = os.path.join(SCRIPT_DIR, "ui", "style.css")
@@ -29,7 +31,7 @@ CSS_PATH = os.path.join(SCRIPT_DIR, "ui", "style.css")
 
 class MainWindow(Adw.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title="Sentinel CAC Manager")
+        super().__init__(application=app, title="Sentinel")
         self.set_default_size(940, 700)
         self.set_size_request(820, 600)
 
@@ -211,14 +213,16 @@ class MainWindow(Adw.ApplicationWindow):
             self.append_log("[HARDWARE] Smart card removed from reader")
 
         # Check overall system readiness:
-        # Browsers are ready if system enterprise policy is active,
-        # or profile is configured, or Chrome NSS DB is configured,
-        # or neither browser is installed on system.
+        # Browsers are ready if at least one supported browser is installed
+        # and its CAC PKCS#11 module/policy is configured.
+        has_supported_browser = b_stat.firefox_installed or b_stat.chrome_installed
         browsers_ready = bool(
-            b_stat.firefox_policy_active
-            or (b_stat.firefox_prompt_configured and b_stat.firefox_module_loaded)
-            or b_stat.chrome_module_loaded
-            or (not b_stat.firefox_installed and not b_stat.chrome_installed)
+            has_supported_browser
+            and (
+                b_stat.firefox_policy_active
+                or (b_stat.firefox_prompt_configured and b_stat.firefox_module_loaded)
+                or b_stat.chrome_module_loaded
+            )
         )
 
         system_ready = bool(
@@ -241,7 +245,7 @@ class MainWindow(Adw.ApplicationWindow):
 class SentinelApplication(Adw.Application):
     def __init__(self):
         super().__init__(
-            application_id="com.codefxr.sentinel_cac_manager",
+            application_id="com.codefxr.sentinel",
             flags=0,
         )
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sentinel CAC Manager - Graphical Setup Wizard Launcher.
+"""Sentinel - Graphical Setup Wizard Launcher.
 Run directly or double-click to launch the native Linux setup wizard.
 """
 

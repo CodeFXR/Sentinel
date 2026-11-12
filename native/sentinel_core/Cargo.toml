@@ -2,7 +2,7 @@
 name = "sentinel_core"
 version = "2.0.3"
 edition = "2021"
-description = "High-performance cryptographic and hardware accelerator for Sentinel CAC Manager"
+description = "High-performance cryptographic and hardware accelerator for Sentinel"
 license = "MIT"
 
 [lib]
@@ -20,3 +20,5 @@ regex = "1.10"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 libloading = "0.8"
 flate2 = "1.1.10"
+sha2 = "0.10"
+libc = "0.2"

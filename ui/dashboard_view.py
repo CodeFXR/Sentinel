@@ -12,7 +12,9 @@ from gi.repository import Gtk, Adw, GdkPixbuf, GLib
 from core.smartcard import SmartCardStatus
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel_cac_manager.png")
+ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel.png")
+if not os.path.isfile(ICON_PATH):
+    ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel_cac_manager.png")
 if not os.path.isfile(ICON_PATH):
     ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel_icon_v2.png")
 
@@ -63,7 +65,7 @@ class DashboardView(Gtk.Box):
         hero_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         hero_text.set_hexpand(True)
 
-        title = Gtk.Label(label="Sentinel CAC Manager")
+        title = Gtk.Label(label="Sentinel")
         title.add_css_class("hero-title")
         title.set_xalign(0)
         hero_text.append(title)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 import re
 import sys
 from typing import Optional
@@ -71,10 +72,13 @@ def cmd_status():
     if b_stat.snap_firefox_detected:
         print(f"  Snap Firefox:          {'[CONNECTED]' if b_stat.snap_connected else '[DISCONNECTED]'}")
 
-    from core.system_fix import check_smartcard_logon_status
+    from core.system_fix import check_smartcard_logon_status, check_scdaemon_conflict
     logon_info = check_smartcard_logon_status()
     lock_str = "[ACTIVE]" if logon_info["lock_removal_enabled"] else "[INACTIVE]"
     print(f"  Lock on Removal:       {lock_str}")
+    scd_conflict, _ = check_scdaemon_conflict()
+    scd_str = "[CONFLICT: LOCK DETECTED]" if scd_conflict else "[NO CONFLICT]"
+    print(f"  GnuPG scdaemon Lock:   {scd_str}")
 
     print("-" * 65)
     print(" SMART CARD HARDWARE")
@@ -272,9 +276,58 @@ def cmd_lock_on_removal(enabled: bool) -> bool:
     return ok
 
 
+def cmd_export_certs(target_dir: str) -> bool:
+    import base64
+    from core.smartcard import scan_smartcard
+
+    out_dir = Path(target_dir).resolve()
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        print(f"[-] Error creating output directory {out_dir}: {e}")
+        return False
+
+    print("[*] Scanning smart card for digital certificates...")
+    status = scan_smartcard(force_refresh=True)
+    if not status.card_present:
+        print("[-] No smart card detected in reader.")
+        return False
+    if not status.certificates:
+        print("[-] No digital certificates found on card.")
+        return False
+
+    exported = 0
+    for cert in status.certificates:
+        if not cert.raw_der:
+            continue
+        clean_holder = re.sub(r"[^a-zA-Z0-9_-]", "_", cert.holder_name or "CAC").strip("_")
+        clean_label = re.sub(r"[^a-zA-Z0-9_-]", "_", cert.label or f"Cert_{cert.id}").strip("_")
+        filename = f"{clean_holder}_{clean_label}.pem"
+        file_path = out_dir / filename
+
+        b64 = base64.b64encode(cert.raw_der).decode("ascii")
+        lines = [b64[i : i + 64] for i in range(0, len(b64), 64)]
+        pem_content = "-----BEGIN CERTIFICATE-----\n" + "\n".join(lines) + "\n-----END CERTIFICATE-----\n"
+
+        try:
+            flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(str(file_path), flags, 0o644)
+            with open(fd, "wb") as f:
+                f.write(pem_content.encode("utf-8"))
+            print(f"[+] Exported: {cert.label} ({cert.id}) -> {file_path}")
+            exported += 1
+        except Exception as e:
+            print(f"[-] Failed to write {filename}: {e}")
+
+    if exported > 0:
+        print(f"[+] Successfully exported {exported} certificate(s) to {out_dir}")
+        return True
+    return False
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Sentinel CAC Manager - Automated DoD CAC Manager for Linux")
-    parser.add_argument("--version", "-v", action="version", version=f"Sentinel CAC Manager v{__version__}")
+    parser = argparse.ArgumentParser(description="Sentinel - Automated DoD CAC Manager for Linux")
+    parser.add_argument("--version", "-v", action="version", version=f"Sentinel v{__version__}")
     parser.add_argument("--status", "--check", action="store_true", help="display system and card status")
     parser.add_argument("--setup-all", "--automate", action="store_true", help="run full automated setup")
     parser.add_argument("--card-info", action="store_true", help="display details of inserted smart card")
@@ -287,6 +340,8 @@ def main():
     parser.add_argument("--browsers", action="store_true", help="configure Firefox and Chrome browsers only")
     parser.add_argument("--certs", action="store_true", help="install DoD certificates only")
     parser.add_argument("--reader-fix", action="store_true", help="apply Broadcom reader hang fix only")
+    parser.add_argument("--scdaemon-fix", action="store_true", help="configure GnuPG scdaemon with disable-ccid to resolve reader lock conflict")
+    parser.add_argument("--export-certs", nargs="?", const=".", metavar="DIR", help="export digital certificates from inserted CAC to directory (default: current dir)")
     parser.add_argument("--gui", action="store_true", help="launch graphical interface")
     parser.add_argument("--installer", action="store_true", help="launch graphical setup wizard")
     parser.add_argument("--check-update", action="store_true", help="check GitHub Releases for a newer version")
@@ -348,6 +403,9 @@ def main():
     elif args.card_info:
         cmd_card_info()
         sys.exit(0)
+    elif args.export_certs is not None:
+        ok = cmd_export_certs(args.export_certs)
+        sys.exit(0 if ok else 1)
     elif args.pin_status:
         rc = cmd_pin_status()
         sys.exit(rc)
@@ -381,6 +439,11 @@ def main():
     elif args.reader_fix:
         from core.system_fix import run_privileged_helper
         ok, _ = run_privileged_helper(["--reader-fix"], log_fn=print)
+        sys.exit(0 if ok else 1)
+    elif args.scdaemon_fix:
+        from core.system_fix import fix_scdaemon_conflict
+        ok, msg = fix_scdaemon_conflict(log_fn=print)
+        print(f"[{'+' if ok else '-'}] {msg}")
         sys.exit(0 if ok else 1)
     else:
         # Default when run without args in terminal: show status or launch GUI if DISPLAY is available

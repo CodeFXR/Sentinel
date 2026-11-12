@@ -1,0 +1,20 @@
+Source: sentinel
+Section: utils
+Priority: optional
+Maintainer: CodeFXR <support@codefxr.com>
+Build-Depends: debhelper-compat (= 13), python3-all, cargo, rustc, libpcsclite-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/CodeFXR/Sentinel
+
+Package: sentinel
+Architecture: any
+Provides: sentinel-cac-manager
+Replaces: sentinel-cac-manager
+Conflicts: sentinel-cac-manager
+Depends: ${shlibs:Depends}, ${misc:Depends}, python3, pcscd, libccid, opensc, libnss3-tools, python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, policykit-1
+Description: Enterprise DoD CAC and PIV Smart Card Manager for Linux
+ Sentinel is a native Linux smart card identity and middleware
+ management application for Department of Defense (DoD) Common Access Cards (CAC)
+ and federal Personal Identity Verification (PIV) credentials. Provides smart card
+ diagnostics, certificate inspection and export, automated DoD PKI trust anchor
+ installation, browser authentication integration, and secure PIN management.

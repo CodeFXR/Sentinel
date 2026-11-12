@@ -1,4 +1,4 @@
-"""Rust Bridge for Sentinel CAC Manager.
+"""Rust Bridge for Sentinel.
 
 Provides high-performance native acceleration for ASN.1 DER/PEM parsing,
 DoD EDIPI regex extraction, ATR matching, and secure memory zeroization.
@@ -193,6 +193,8 @@ def parse_card_certificate_rust(
             is_valid=py_cert.is_valid,
             status_text=py_cert.status_text,
             raw_der=raw_der_bytes,
+            upn=getattr(py_cert, "upn", None),
+            aia_url=getattr(py_cert, "aia_url", None),
         )
     except Exception as e:
         logger.debug(f"Rust parse_certificate failed for id={cert_id}: {e}")
@@ -247,11 +249,30 @@ def read_card_certificates_rust(reader_name: Optional[str] = None) -> List["Card
                 is_valid=py_cert.is_valid,
                 status_text=py_cert.status_text,
                 raw_der=raw_der_bytes,
+                upn=getattr(py_cert, "upn", None),
+                aia_url=getattr(py_cert, "aia_url", None),
             ))
         return results
     except Exception as e:
         logger.debug(f"Rust read_card_certificates failed: {e}")
         return []
+
+
+def read_card_metadata_rust(reader_name: Optional[str] = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Read smart card name, token label, and token serial number directly via PIV APDU containers (CHUID / CCC).
+
+    Returns:
+        (card_name, token_label, token_serial)
+    """
+    if not is_rust_available() or not hasattr(_sentinel_core, "read_card_metadata"):
+        return None, None, None
+
+    try:
+        meta = _sentinel_core.read_card_metadata(reader_name)
+        return meta.card_name, meta.token_label, meta.token_serial
+    except Exception as e:
+        logger.debug(f"Rust read_card_metadata failed: {e}")
+        return None, None, None
 
 
 def parse_pkcs15_list_rust(output: str) -> List[Tuple[str, str]]:
@@ -348,37 +369,12 @@ def _query_pin_status_cli_fallback(reader_name: Optional[str] = None) -> Tuple[b
                         return True, 1, "1 attempt remaining (FINAL TRY)"
                     elif "locked" in l_low:
                         return True, 0, "PIN locked"
-                    return True, 3, "PIN operational"
+                    # Do not fabricate a numeric retry count if exact counter was not returned
+                    return True, 255, "PIN operational (exact retry count unread; requires native PC/SC)"
         except Exception as e:
             logger.debug(f"pkcs11-tool PIN query note: {e}")
 
     return False, 0, "Native smart card engine unavailable (opensc-tool / pkcs11-tool not found or reader empty)"
-
-
-def _change_pin_cli_fallback(old_pin: str, new_pin: str, reader_name: Optional[str] = None) -> Tuple[bool, int, str]:
-    """Pure-Python / CLI fallback to change PIN via pkcs11-tool."""
-    import os
-    import shutil
-    import subprocess
-
-    p11_tool = shutil.which("pkcs11-tool")
-    if p11_tool:
-        try:
-            from core.privileged_helper import find_default_opensc_module
-            mod_path = find_default_opensc_module()
-            cmd = [p11_tool, "--change-pin", "--pin", old_pin, "--new-pin", new_pin]
-            if mod_path and os.path.isfile(mod_path):
-                cmd.extend(["--module", mod_path])
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            if res.returncode == 0:
-                return True, 3, "PIN changed successfully"
-            else:
-                err = res.stderr.strip() or res.stdout.strip()
-                return False, 0, f"PIN change failed: {err}"
-        except Exception as e:
-            return False, 0, f"PIN change error: {e}"
-
-    return False, 0, "Native smart card engine unavailable (pkcs11-tool not installed)"
 
 
 def query_pin_status_rust(reader_name: Optional[str] = None) -> Tuple[bool, int, str]:
@@ -415,7 +411,15 @@ def change_pin_rust(old_pin: str, new_pin: str, reader_name: Optional[str] = Non
         except Exception as e:
             logger.debug(f"Rust change_pin failed: {e}")
             return False, 0, f"PIN change failure: {e}"
-    return _change_pin_cli_fallback(old_pin, new_pin, reader_name)
+
+    # Never pass PIN credentials on subprocess command-line arguments (SEC-05 / CWE-214).
+    # Secure cardholder verification requires direct in-process PC/SC APDU execution.
+    return (
+        False,
+        0,
+        "Secure PIN modification requires the compiled native Rust security core "
+        "(in-memory APDU only; CLI argument fallback is prohibited for credential security).",
+    )
 
 
 def wait_for_card_event_rust(timeout_ms: int = 3000) -> Optional[Tuple[str, bool]]:
@@ -423,11 +427,14 @@ def wait_for_card_event_rust(timeout_ms: int = 3000) -> Optional[Tuple[str, bool
 
     Returns (reader_name, is_card_present) on state change, or None on timeout.
     """
+    import time
     if is_rust_available() and hasattr(_sentinel_core, "wait_for_card_event"):
         try:
             return _sentinel_core.wait_for_card_event(timeout_ms)
         except Exception as e:
             logger.debug(f"Rust wait_for_card_event failed: {e}")
+    # Prevent tight polling loops when native engine is unavailable
+    time.sleep(max(0.1, timeout_ms / 1000.0))
     return None
 
 

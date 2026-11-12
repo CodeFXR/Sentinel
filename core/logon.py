@@ -1,0 +1,142 @@
+"""Workstation Smart Card Logon (PAM & SSSD) for Sentinel.
+
+Enables secure Linux console and display manager (GDM/SDDM) smart card authentication
+bound to a local POSIX user account via strict 10-digit DoD EDIPI certificate mapping.
+
+Safety Guarantee:
+Modifying system PAM or SSSD configuration on bare metal carries risk of workstation
+lockout. This module requires VM execution (detected via systemd-detect-virt) or an
+explicit administrative bypass flag (--force-host or SENTINEL_ALLOW_HOST_LOGON=1)
+before applying authentication mutations to the host OS.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+import shutil
+import subprocess
+from typing import Optional, Tuple
+
+logger = logging.getLogger("sentinel.logon")
+
+VALID_USER_RE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
+VALID_EDIPI_RE = re.compile(r"^[0-9]{10}$")
+
+STATE_DIR = "/var/lib/sentinel"
+LOGON_STATE_FILE = os.path.join(STATE_DIR, "logon_state.json")
+SSSD_CONF_MAIN = "/etc/sssd/sssd.conf"
+SSSD_CONF_DROPIN_DIR = "/etc/sssd/conf.d"
+SSSD_DROPIN_PATH = os.path.join(SSSD_CONF_DROPIN_DIR, "sentinel-smartcard.conf")
+SSSD_PKI_DIR = "/etc/sssd/pki"
+SSSD_CA_DB_PATH = os.path.join(SSSD_PKI_DIR, "sssd_auth_ca_db.pem")
+
+
+def is_running_in_vm() -> bool:
+    """Detect if current execution environment is a virtual machine or container."""
+    # 1. Check systemd-detect-virt
+    virt_tool = shutil.which("systemd-detect-virt")
+    if virt_tool:
+        try:
+            res = subprocess.run([virt_tool], capture_output=True, text=True, timeout=2)
+            out = res.stdout.strip().lower()
+            if res.returncode == 0 and out and out != "none":
+                return True
+        except Exception:
+            pass
+
+    # 2. Check DMI sys_vendor and product_name
+    dmi_vendor_path = "/sys/class/dmi/id/sys_vendor"
+    dmi_product_path = "/sys/class/dmi/id/product_name"
+    vm_indicators = {"qemu", "kvm", "vmware", "virtualbox", "innotek", "xen", "amazon ec2", "microsoft corporation"}
+
+    for path in (dmi_vendor_path, dmi_product_path):
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    val = f.read().strip().lower()
+                    if any(vm in val for vm in vm_indicators):
+                        return True
+            except OSError:
+                pass
+
+    return False
+
+
+def validate_logon_inputs(target_user: Optional[str], edipi: Optional[str]) -> Tuple[bool, str]:
+    """Validate target username and mandatory 10-digit DoD EDIPI."""
+    if not target_user or not VALID_USER_RE.match(target_user.strip()):
+        return False, "Refusing logon setup: A valid local Linux username is required."
+    if not edipi or not VALID_EDIPI_RE.match(edipi.strip()):
+        return (
+            False,
+            "Refusing logon setup: A verified 10-digit DoD EDIPI is required to bind the smart card "
+            "to the local account (wildcard CN matching is prohibited).",
+        )
+    return True, "Valid inputs"
+
+
+def has_existing_enterprise_sssd_domain(
+    sssd_conf_path: str = SSSD_CONF_MAIN,
+    conf_d_dir: str = SSSD_CONF_DROPIN_DIR,
+) -> Tuple[bool, str]:
+    """Check if SSSD already has non-Sentinel enterprise domains (AD/IPA/LDAP) configured."""
+    paths_to_check = []
+    if os.path.isfile(sssd_conf_path):
+        paths_to_check.append(sssd_conf_path)
+    if os.path.isdir(conf_d_dir):
+        for fname in sorted(os.listdir(conf_d_dir)):
+            if fname.endswith(".conf") and fname != "sentinel-smartcard.conf":
+                paths_to_check.append(os.path.join(conf_d_dir, fname))
+
+    for p in paths_to_check:
+        try:
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#") or stripped.startswith(";"):
+                    continue
+                if re.match(r"^domains\s*=", stripped, re.IGNORECASE):
+                    val = stripped.split("=", 1)[1].strip()
+                    if val and val != "local":
+                        return True, f"Existing SSSD domain configuration detected in {p} (domains = {val})"
+                if re.match(r"^\[domain/(?!local\])[^\]]+\]", stripped, re.IGNORECASE):
+                    return True, f"Existing SSSD domain section detected in {p}: {stripped}"
+        except OSError:
+            continue
+
+    return False, ""
+
+
+def build_sssd_smartcard_config(target_user: str, edipi: str, ca_db_path: str = SSSD_CA_DB_PATH) -> str:
+    """Build SSSD drop-in configuration with strict EDIPI subject matching and local user mapping."""
+    ok, err = validate_logon_inputs(target_user, edipi)
+    if not ok:
+        raise ValueError(err)
+
+    clean_user = target_user.strip()
+    clean_edipi = edipi.strip()
+
+    return (
+        "# Generated by Sentinel - Workstation Smart Card Logon\n"
+        "[sssd]\n"
+        "enable_files_domain = True\n"
+        "domains = local\n"
+        "services = nss, pam\n\n"
+        "[domain/local]\n"
+        "id_provider = files\n\n"
+        "[pam]\n"
+        "pam_cert_auth = True\n"
+        f"pam_cert_db_path = {ca_db_path}\n\n"
+        f"[certmap/local/{clean_user}]\n"
+        f"matchrule = <SUBJECT>.*\\.({clean_edipi})(?:\\b|[^0-9]).*\n"
+        f"maprule = (uid={clean_user})\n"
+        "domains = local\n"
+    )
+
+
+def is_workstation_logon_enabled() -> bool:
+    """Check if workstation smart card logon is actively configured."""
+    return os.path.isfile(SSSD_DROPIN_PATH) and os.path.isfile(SSSD_CA_DB_PATH)

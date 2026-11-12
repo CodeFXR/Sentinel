@@ -1,14 +1,27 @@
 use pyo3::prelude::*;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::Zeroize;
 
 /// A memory-hardened buffer for sensitive credentials (PINs/PUKs).
-/// Scans and zeros out allocated memory when dropped.
+/// Locks allocated buffer pages in RAM via `mlock` to prevent swap leakage,
+/// and securely zeroes out memory upon drop.
 #[pyclass]
-#[derive(Zeroize, ZeroizeOnDrop)]
+#[derive(Zeroize)]
 pub struct PinBuffer {
     #[zeroize(skip)]
     len: usize,
     buffer: Vec<u8>,
+}
+
+impl Drop for PinBuffer {
+    fn drop(&mut self) {
+        if !self.buffer.is_empty() {
+            unsafe {
+                libc::munlock(self.buffer.as_ptr() as *const libc::c_void, self.buffer.capacity());
+            }
+        }
+        self.buffer.zeroize();
+        self.len = 0;
+    }
 }
 
 #[pymethods]
@@ -17,6 +30,11 @@ impl PinBuffer {
     pub fn new(pin: &str) -> Self {
         let bytes = pin.as_bytes().to_vec();
         let len = bytes.len();
+        if !bytes.is_empty() {
+            unsafe {
+                libc::mlock(bytes.as_ptr() as *const libc::c_void, bytes.capacity());
+            }
+        }
         Self { len, buffer: bytes }
     }
 
@@ -33,6 +51,11 @@ impl PinBuffer {
     }
 
     pub fn scrub(&mut self) {
+        if !self.buffer.is_empty() {
+            unsafe {
+                libc::munlock(self.buffer.as_ptr() as *const libc::c_void, self.buffer.capacity());
+            }
+        }
         self.buffer.zeroize();
         self.len = 0;
     }

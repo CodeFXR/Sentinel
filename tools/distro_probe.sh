@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Sentinel CAC Manager — Distribution Telemetry & Hardware Inspector
+# Sentinel — Distribution Telemetry & Hardware Inspector
 # ==============================================================================
 set -euo pipefail
 
@@ -11,7 +11,7 @@ CYAN="\033[36m"
 RED="\033[31m"
 RESET="\033[0m"
 
-echo -e "${BOLD}${CYAN}=== Sentinel CAC Manager: Distro Telemetry Report ===${RESET}"
+echo -e "${BOLD}${CYAN}=== Sentinel: Distro Telemetry Report ===${RESET}"
 date -u +"Timestamp (UTC): %Y-%m-%d %H:%M:%S"
 
 echo -e "\n${BOLD}${YELLOW}[1. Operating System & Kernel]${RESET}"

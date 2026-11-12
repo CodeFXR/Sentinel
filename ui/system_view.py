@@ -167,7 +167,7 @@ class SystemView(Gtk.Box):
             "Check for verified Sentinel releases from GitHub (pinned tags and SHA-256 checksum verification)."
         )
 
-        self.update_row = Adw.ActionRow(title=f"Sentinel CAC Manager v{__version__}")
+        self.update_row = Adw.ActionRow(title=f"Sentinel v{__version__}")
         self.update_row.set_subtitle("Release channel: GitHub Releases (SHA-256 verified)")
         self.update_badge = Gtk.Label(label=f"v{__version__}")
         self.update_badge.add_css_class("badge-info")

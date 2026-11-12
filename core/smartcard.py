@@ -46,6 +46,8 @@ class CardCertificate:
     status_text: str
     raw_der: Optional[bytes] = None
     ocsp_status: Optional[str] = None
+    upn: Optional[str] = None
+    aia_url: Optional[str] = None
 
 
 @dataclass
@@ -600,7 +602,7 @@ def verify_cert_ocsp(
             headers={
                 "Content-Type": "application/ocsp-request",
                 "Accept": "application/ocsp-response",
-                "User-Agent": f"Sentinel-CAC-Manager/{__version__}",
+                "User-Agent": f"Sentinel/{__version__}",
             },
         )
 
@@ -675,7 +677,7 @@ def scan_smartcard(force_refresh: bool = False) -> SmartCardStatus:
     pkcs11_tool = shutil.which("pkcs11-tool")
 
     # 0. Fast-path: Direct PC/SC Lite native inspection (reader presence + ATR only, zero APDUs)
-    from core.rust_bridge import query_native_pcsc_rust
+    from core.rust_bridge import query_native_pcsc_rust, read_card_metadata_rust
     native_pcsc = query_native_pcsc_rust()
     native_queried = False
 
@@ -753,7 +755,16 @@ def scan_smartcard(force_refresh: bool = False) -> SmartCardStatus:
             pin_status_msg=cached.pin_status_msg,
         )
 
-    if native_queried and not card_name and opensc_tool:
+    # 1.5 Query card metadata (token serial, label, model) via native NIST PIV CHUID/CCC
+    native_c_name, native_t_label, native_t_serial = read_card_metadata_rust(reader_name)
+    if native_c_name and not card_name:
+        card_name = native_c_name
+    if native_t_label and not token_label:
+        token_label = native_t_label
+    if native_t_serial and not token_serial:
+        token_serial = native_t_serial
+
+    if not card_name and opensc_tool:
         try:
             res_name = subprocess.run([opensc_tool, "-n"], capture_output=True, text=True, timeout=2)
             name_out = res_name.stdout.strip()
@@ -762,14 +773,14 @@ def scan_smartcard(force_refresh: bool = False) -> SmartCardStatus:
         except Exception:
             pass
 
-    # 2. Extract Token Label & Serial from pkcs11-tool (only on initial insertion or forced refresh)
-    if pkcs11_tool:
+    # 2. Extract Token Label & Serial from pkcs11-tool (fallback only if native inspection did not resolve serial)
+    if not token_serial and pkcs11_tool:
         try:
             res_p11 = subprocess.run([pkcs11_tool, "-L"], capture_output=True, text=True, timeout=4)
             for line in res_p11.stdout.splitlines():
-                if "token label" in line:
+                if "token label" in line and not token_label:
                     token_label = line.split(":", 1)[1].strip()
-                elif "serial num" in line:
+                elif "serial num" in line and not token_serial:
                     token_serial = line.split(":", 1)[1].strip()
                 elif "Slot" in line and not reader_name:
                     reader_name = line.split(":", 1)[1].strip()

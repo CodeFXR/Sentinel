@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Privileged helper script for Sentinel CAC Manager.
+"""Privileged helper script for Sentinel.
 Runs elevated tasks (system certs, systemctl, opensc.conf, enterprise policies)
 under a single pkexec / sudo invocation so the user only authenticates ONCE.
 """
@@ -191,7 +191,7 @@ def ensure_system_helper():
 
         src_core_dir = os.path.dirname(current_script) if os.path.basename(os.path.dirname(current_script)) == "core" else os.path.join(os.path.dirname(current_script), "core")
         if os.path.isdir(src_core_dir):
-            for mod_name in ["ca_manifest.py", "ownership.py", "rust_bridge.py", "__init__.py"]:
+            for mod_name in ["ca_manifest.py", "ownership.py", "rust_bridge.py", "__init__.py", "libsentinel_core.so"]:
                 src_mod = os.path.join(src_core_dir, mod_name)
                 if os.path.isfile(src_mod):
                     dst_mod = os.path.join(sys_core_dir, mod_name)
@@ -199,7 +199,7 @@ def ensure_system_helper():
                         tmp_m = f_tmp.name
                         with open(src_mod, "rb") as f_s:
                             f_tmp.write(f_s.read())
-                    os.chmod(tmp_m, 0o644)
+                    os.chmod(tmp_m, 0o755 if mod_name.endswith(".so") else 0o644)
                     try:
                         os.chown(tmp_m, 0, 0)
                     except Exception:
@@ -267,11 +267,11 @@ def fix_opensc_hang() -> bool:
             + original[idx:]
         )
     elif original.strip():
-        updated = original.rstrip() + f"\n\napp default {{\n\t# Added by Sentinel CAC Manager.\n\t{OPENSC_DIRECTIVE}\n}}\n"
+        updated = original.rstrip() + f"\n\napp default {{\n\t# Added by Sentinel.\n\t{OPENSC_DIRECTIVE}\n}}\n"
     else:
         updated = (
             "app default {\n"
-            "\t# Added by Sentinel CAC Manager.\n"
+            "\t# Added by Sentinel.\n"
             "\t# Restricts card drivers to skip the 26-second Broadcom 58200 setcos probe hang.\n"
             f"\t{OPENSC_DIRECTIVE}\n"
             "}\n"
@@ -1022,7 +1022,7 @@ def install_p11_kit_module(module_path: str) -> bool:
     os.makedirs(mod_dir, exist_ok=True)
     # Use sentinel-opensc.module so we never shadow the distribution's own opensc.module
     mod_file = os.path.join(mod_dir, "sentinel-opensc.module")
-    content = f"# Added by Sentinel CAC Manager\nmodule: {validated_mod}\n"
+    content = f"# Added by Sentinel\nmodule: {validated_mod}\n"
     try:
         with tempfile.NamedTemporaryFile(mode="w", dir=mod_dir, delete=False, encoding="utf-8") as f_out:
             tmp_name = f_out.name
@@ -1036,7 +1036,8 @@ def install_p11_kit_module(module_path: str) -> bool:
         if os.path.isfile(legacy_mod):
             try:
                 with open(legacy_mod, "r", encoding="utf-8", errors="replace") as f_leg:
-                    if "Sentinel CAC Manager" in f_leg.read():
+                    c = f_leg.read()
+                    if "Sentinel" in c or "Sentinel CAC Manager" in c:
                         os.remove(legacy_mod)
             except OSError:
                 pass
@@ -1182,7 +1183,7 @@ def cleanup_legacy_smartcard_logon(distro_family: str) -> bool:
 
 def uninstall_system_configuration(distro_family: str) -> bool:
     """Revert Sentinel system configuration, remove Sentinel-installed DoD CAs, and restore policies."""
-    log("Reverting Sentinel CAC Manager system configuration and removing trust...")
+    log("Reverting Sentinel system configuration and removing trust...")
     all_ok = True
 
     # 1. Remove ONLY Sentinel-owned system CA certificates (never rmtree shared directories)

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Sentinel
+GenericName=DoD Smart Card Manager
+Comment=Enterprise DoD CAC and PIV Smart Card Manager for Linux
+Exec=sentinel --gui
+Icon=sentinel
+Terminal=false
+Type=Application
+Categories=Utility;Security;GTK;
+StartupWMClass=com.codefxr.sentinel
+Keywords=CAC;PIV;DoD;SmartCard;Military;Security;Authentication;

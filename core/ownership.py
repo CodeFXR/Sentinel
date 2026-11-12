@@ -1,4 +1,4 @@
-"""Durable State and Ownership Ledger for Sentinel CAC Manager.
+"""Durable State and Ownership Ledger for Sentinel.
 
 Tracks exact file paths, SHA-256 digests, pre-existing file/symlink backups, and pre-existing
 JSON policy snapshots so uninstallation only removes or reverts state that Sentinel

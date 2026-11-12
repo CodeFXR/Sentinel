@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+    systemctl daemon-reload || true
+    systemctl enable --now pcscd.socket pcscd || true
+    if [ -x /usr/libexec/sentinel/privileged_helper.py ]; then
+        /usr/libexec/sentinel/privileged_helper.py --certs --family debian || true
+    fi
+fi
+
+#DEBHELPER#
+exit 0

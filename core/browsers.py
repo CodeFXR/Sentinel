@@ -68,7 +68,7 @@ def configure_firefox_user_js(profile_dir: str) -> bool:
     """Configure security.default_personal_cert = 'Ask Every Time' in profile user.js, recording pre-existing state."""
     user_js = os.path.join(profile_dir, "user.js")
     snap_file = os.path.join(profile_dir, ".sentinel_user_js_snap.json")
-    header = "// Added by Sentinel CAC Manager"
+    header = "// Added by Sentinel"
     pref_lines = [
         'user_pref("security.default_personal_cert", "Ask Every Time");',
         'user_pref("security.enterprise_roots.enabled", true);',
@@ -104,7 +104,7 @@ def configure_firefox_user_js(profile_dir: str) -> bool:
         with open(user_js, "a", encoding="utf-8") as f:
             if not existing.endswith("\n") and existing:
                 f.write("\n")
-            if header not in existing:
+            if header not in existing and "// Added by Sentinel CAC Manager" not in existing:
                 f.write(f"{header}\n")
             for line in to_add:
                 f.write(f"{line}\n")
@@ -137,6 +137,7 @@ def revert_firefox_user_js(profile_dir: str) -> bool:
         return True
 
     sentinel_lines = {
+        "// Added by Sentinel",
         "// Added by Sentinel CAC Manager",
         'user_pref("security.default_personal_cert", "Ask Every Time");',
         'user_pref("security.enterprise_roots.enabled", true);',
@@ -227,7 +228,7 @@ def configure_p11_kit_user_module(module_path: str, home_dir: Optional[str] = No
     user_mod_dir = os.path.join(home, ".config", "pkcs11", "modules")
     os.makedirs(user_mod_dir, exist_ok=True)
     mod_file = os.path.join(user_mod_dir, "sentinel-opensc.module")
-    content = f"# Configured by Sentinel CAC Manager\nmodule: {module_path}\n"
+    content = f"# Configured by Sentinel\nmodule: {module_path}\n"
     try:
         with open(mod_file, "w", encoding="utf-8") as f:
             f.write(content)
@@ -236,7 +237,8 @@ def configure_p11_kit_user_module(module_path: str, home_dir: Optional[str] = No
         if os.path.isfile(legacy_mod):
             try:
                 with open(legacy_mod, "r", encoding="utf-8", errors="replace") as fl:
-                    if "Sentinel CAC Manager" in fl.read():
+                    c = fl.read()
+                    if "Sentinel" in c or "Sentinel CAC Manager" in c:
                         os.remove(legacy_mod)
             except OSError:
                 pass

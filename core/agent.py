@@ -1,4 +1,4 @@
-"""Background event daemon for Sentinel CAC Manager.
+"""Background event daemon for Sentinel.
 
 Monitors smart card reader insertion and removal events using native Rust
 blocking PC/SC notification with zero CPU polling overhead, and emits
@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
@@ -23,12 +24,12 @@ from core.smartcard import scan_smartcard
 logger = logging.getLogger("sentinel.agent")
 
 SYSTEMD_USER_SERVICE_CONTENT = """[Unit]
-Description=Sentinel CAC Manager Card Monitor Daemon
+Description=Sentinel Card Monitor Daemon
 After=default.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/sentinel-cac-manager --agent
+ExecStart=%h/.local/bin/sentinel --agent
 Restart=on-failure
 RestartSec=5s
 
@@ -174,14 +175,16 @@ def send_desktop_notification(
         return False
 
     repo_root = Path(__file__).resolve().parent.parent
-    icon_candidate = str(repo_root / "sentinel_cac_manager.png")
+    icon_candidate = str(repo_root / "sentinel.png")
+    if not os.path.isfile(icon_candidate):
+        icon_candidate = str(repo_root / "sentinel_cac_manager.png")
     app_icon = icon or (icon_candidate if os.path.isfile(icon_candidate) else "dialog-password-symbolic")
 
     try:
         subprocess.run(
             [
                 notify_send,
-                "-a", "Sentinel CAC Manager",
+                "-a", "Sentinel",
                 "-u", urgency,
                 "-i", app_icon,
                 title,
@@ -198,7 +201,7 @@ def send_desktop_notification(
 
 def run_agent(stop_event: Optional[threading.Event] = None) -> None:
     """Run event-driven smart card listener loop until interrupted or stop_event is set."""
-    logger.info("Starting Sentinel CAC Manager background event daemon...")
+    logger.info("Starting Sentinel background event daemon...")
 
     # Set up signal handlers if running on the main thread
     if threading.current_thread() is threading.main_thread():
@@ -224,6 +227,7 @@ def run_agent(stop_event: Optional[threading.Event] = None) -> None:
 
         event = wait_for_card_event_rust(timeout_ms=2000)
         if event is None:
+            time.sleep(0.5)
             continue
 
         reader_name, is_present = event

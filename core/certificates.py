@@ -1,4 +1,4 @@
-"""DoD Certificate Bundle and Trust Store Management for Sentinel CAC Manager."""
+"""DoD Certificate Bundle and Trust Store Management for Sentinel."""
 
 from __future__ import annotations
 

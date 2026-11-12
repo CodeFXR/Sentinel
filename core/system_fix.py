@@ -1,4 +1,4 @@
-"""System-wide configuration orchestrator and package installer for Sentinel CAC Manager."""
+"""System-wide configuration orchestrator and package installer for Sentinel."""
 
 from __future__ import annotations
 
@@ -354,9 +354,13 @@ def install_desktop_integration(
     bin_dir = os.path.join(home, ".local", "bin")
     app_dir = os.path.join(home, ".local", "share", "applications")
     icon_dir = os.path.join(home, ".local", "share", "icons", "hicolor", "256x256", "apps")
-    script_target = os.path.join(project_dir, "sentinel_cac_manager.py")
-    launcher_path = os.path.join(bin_dir, "sentinel-cac-manager")
-    desktop_file = os.path.join(app_dir, "sentinel_cac_manager.desktop")
+    script_target = os.path.join(project_dir, "sentinel.py")
+    if not os.path.isfile(script_target):
+        script_target = os.path.join(project_dir, "sentinel_cac_manager.py")
+    launcher_path = os.path.join(bin_dir, "sentinel")
+    compat_launcher_path = os.path.join(bin_dir, "sentinel-cac-manager")
+    desktop_file = os.path.join(app_dir, "sentinel.desktop")
+    compat_desktop_file = os.path.join(app_dir, "sentinel_cac_manager.desktop")
 
     for p_name, p_val in (
         ("project_dir", project_dir),
@@ -389,15 +393,20 @@ def install_desktop_integration(
         os.makedirs(app_dir, exist_ok=True)
         os.makedirs(icon_dir, exist_ok=True)
 
-        for candidate_icon in ["sentinel_cac_manager.png", "sentinel_icon.png", "sentinel_icon_v2.png"]:
+        for candidate_icon in ["sentinel.png", "sentinel_cac_manager.png", "sentinel_icon.png", "sentinel_icon_v2.png"]:
             icon_src = os.path.join(project_dir, candidate_icon)
             if os.path.isfile(icon_src):
+                shutil.copy2(icon_src, os.path.join(icon_dir, "sentinel.png"))
                 shutil.copy2(icon_src, os.path.join(icon_dir, "sentinel_cac_manager.png"))
                 if log_fn:
-                    log_fn(f"Installed application icon to {icon_dir}/sentinel_cac_manager.png")
+                    log_fn(f"Installed application icon to {icon_dir}/sentinel.png")
                 break
 
-        icon_path = os.path.join(icon_dir, "sentinel_cac_manager.png")
+        icon_path = os.path.join(icon_dir, "sentinel.png")
+        if not os.path.isfile(icon_path):
+            icon_path = os.path.join(icon_dir, "sentinel_cac_manager.png")
+        if not os.path.isfile(icon_path):
+            icon_path = os.path.join(project_dir, "sentinel.png")
         if not os.path.isfile(icon_path):
             icon_path = os.path.join(project_dir, "sentinel_cac_manager.png")
 
@@ -413,7 +422,7 @@ def install_desktop_integration(
         escaped_icon_path = escape_desktop_value(icon_path)
 
         desktop_content = f"""[Desktop Entry]
-Name=Sentinel CAC Manager
+Name=Sentinel
 GenericName=DoD Smart Card Manager
 Comment=Automate DoD CAC Middleware, Certificates, and Browser Authentication
 Exec=python3 {escaped_script} --gui
@@ -424,13 +433,20 @@ Type=Application
 Categories=Utility;Security;
 Keywords=CAC;PIV;DoD;SmartCard;Military;Security;Authentication;
 StartupNotify=true
-StartupWMClass=com.codefxr.sentinel_cac_manager
+StartupWMClass=com.codefxr.sentinel
 """
         with tempfile.NamedTemporaryFile(mode="w", dir=app_dir, delete=False, encoding="utf-8") as f_dt:
             desktop_tmp = f_dt.name
             f_dt.write(desktop_content)
         os.chmod(desktop_tmp, 0o644)
         os.replace(desktop_tmp, desktop_file)
+
+        # Compatibility copy for legacy desktop file name
+        with tempfile.NamedTemporaryFile(mode="w", dir=app_dir, delete=False, encoding="utf-8") as f_cdt:
+            compat_dt_tmp = f_cdt.name
+            f_cdt.write(desktop_content)
+        os.chmod(compat_dt_tmp, 0o644)
+        os.replace(compat_dt_tmp, compat_desktop_file)
 
         legacy_desktop = os.path.join(app_dir, "sentinel_v2.desktop")
         if os.path.isfile(legacy_desktop):
@@ -446,26 +462,18 @@ StartupWMClass=com.codefxr.sentinel_cac_manager
         launcher_script = f"""#!/usr/bin/env bash
 exec python3 {quoted_script} "$@"
 """
-        with tempfile.NamedTemporaryFile(mode="w", dir=bin_dir, delete=False, encoding="utf-8") as f_ln:
-            launcher_tmp = f_ln.name
-            f_ln.write(launcher_script)
-        os.chmod(launcher_tmp, 0o755)
-        os.replace(launcher_tmp, launcher_path)
+        if not os.path.exists(launcher_path) or os.path.islink(launcher_path):
+            with tempfile.NamedTemporaryFile(mode="w", dir=bin_dir, delete=False, encoding="utf-8") as f_ln:
+                launcher_tmp = f_ln.name
+                f_ln.write(launcher_script)
+            os.chmod(launcher_tmp, 0o755)
+            os.replace(launcher_tmp, launcher_path)
 
-        alias_path = os.path.join(bin_dir, "sentinel")
-        if os.path.islink(alias_path):
-            try:
-                target = os.readlink(alias_path)
-                if "sentinel-cac-manager" in target or "sentinel" in target:
-                    os.remove(alias_path)
-                    os.symlink(launcher_path, alias_path)
-            except OSError:
-                pass
-        elif not os.path.exists(alias_path):
-            try:
-                os.symlink(launcher_path, alias_path)
-            except OSError:
-                pass
+        with tempfile.NamedTemporaryFile(mode="w", dir=bin_dir, delete=False, encoding="utf-8") as f_cln:
+            compat_tmp = f_cln.name
+            f_cln.write(launcher_script)
+        os.chmod(compat_tmp, 0o755)
+        os.replace(compat_tmp, compat_launcher_path)
 
         for old_alias in ["sentinel-v2", "sentinel2"]:
             old_p = os.path.join(bin_dir, old_alias)
@@ -529,12 +537,16 @@ def uninstall_desktop_integration(
         logger.debug(f"Browser cleanup note: {e}")
 
     files_to_remove = [
+        os.path.join(app_dir, "sentinel.desktop"),
         os.path.join(app_dir, "sentinel_cac_manager.desktop"),
         os.path.join(app_dir, "sentinel_v2.desktop"),
+        os.path.join(icon_dir, "sentinel.png"),
         os.path.join(icon_dir, "sentinel_cac_manager.png"),
+        os.path.join(bin_dir, "sentinel"),
         os.path.join(bin_dir, "sentinel-cac-manager"),
         os.path.join(bin_dir, "sentinel-v2"),
         os.path.join(bin_dir, "sentinel2"),
+        os.path.join(desktop_dir, "sentinel.desktop"),
         os.path.join(desktop_dir, "sentinel_cac_manager.desktop"),
         os.path.join(desktop_dir, "sentinel_v2.desktop"),
         os.path.join(home, ".config", "pkcs11", "modules", "sentinel-opensc.module"),
@@ -588,7 +600,7 @@ def run_full_uninstall(log_callback: Optional[Callable[[str], None]] = None) -> 
         if log_callback:
             log_callback(msg)
 
-    _log("Starting Sentinel CAC Manager full uninstallation and rollback...")
+    _log("Starting Sentinel full uninstallation and rollback...")
     plat = detect_platform()
 
     # Step 1: Revert user desktop and browser integration (NSS DB, Firefox prefs, launchers)
@@ -667,3 +679,73 @@ def set_lock_on_removal(
 
     status_str = "enabled" if enabled else "disabled"
     return True, f"Screen lock on smart card removal {status_str}."
+
+
+def check_scdaemon_conflict() -> Tuple[bool, str]:
+    """Check if GnuPG scdaemon is running and potentially locking CCID smart card readers.
+
+    Returns: (is_conflicted, detail_message)
+    """
+    pgrep = shutil.which("pgrep")
+    if not pgrep:
+        return False, "pgrep not available"
+
+    try:
+        res = subprocess.run([pgrep, "-x", "scdaemon"], capture_output=True, text=True, timeout=2)
+        if res.returncode == 0:
+            # Check if disable-ccid is configured in scdaemon configs
+            has_disable_ccid = False
+            for conf_path in [
+                Path.home() / ".gnupg" / "scdaemon.conf",
+                Path("/etc/gnupg/scdaemon.conf"),
+            ]:
+                if conf_path.is_file():
+                    try:
+                        content = conf_path.read_text(encoding="utf-8", errors="replace")
+                        for line in content.splitlines():
+                            line_strip = line.split("#", 1)[0].strip()
+                            if "disable-ccid" in line_strip:
+                                has_disable_ccid = True
+                                break
+                    except Exception:
+                        pass
+            if not has_disable_ccid:
+                return True, "GnuPG scdaemon is active without 'disable-ccid'; may lock USB CCID reader."
+    except Exception as e:
+        logger.debug(f"scdaemon check failed: {e}")
+
+    return False, "No scdaemon conflict detected."
+
+
+def fix_scdaemon_conflict(log_fn: Optional[Callable[[str], None]] = None) -> Tuple[bool, str]:
+    """Configure disable-ccid in ~/.gnupg/scdaemon.conf and reload GnuPG scdaemon."""
+    def _log(msg: str):
+        if log_fn:
+            log_fn(msg)
+
+    gnupg_dir = Path.home() / ".gnupg"
+    try:
+        gnupg_dir.mkdir(parents=True, exist_ok=True)
+        gnupg_dir.chmod(0o700)
+        conf_file = gnupg_dir / "scdaemon.conf"
+        content = ""
+        if conf_file.is_file():
+            content = conf_file.read_text(encoding="utf-8", errors="replace")
+
+        lines = content.splitlines()
+        has_disable_ccid = any("disable-ccid" in line.split("#", 1)[0] for line in lines)
+        if not has_disable_ccid:
+            lines.append("disable-ccid")
+            conf_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            conf_file.chmod(0o600)
+            _log("Added 'disable-ccid' to ~/.gnupg/scdaemon.conf")
+
+        # Terminate active scdaemon so gpg-agent re-evaluates the updated configuration
+        gpgconf = shutil.which("gpgconf")
+        if gpgconf:
+            subprocess.run([gpgconf, "--kill", "scdaemon"], capture_output=True, timeout=3)
+            _log("Reloaded GnuPG daemon components")
+
+        return True, "Successfully configured GnuPG scdaemon to share CCID reader with pcscd."
+    except Exception as e:
+        return False, f"Failed to configure scdaemon: {e}"

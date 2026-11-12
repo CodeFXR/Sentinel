@@ -12,8 +12,9 @@ use zeroize::Zeroize;
 use cert::{parse_der_or_pem_bytes, PyCardCertificate};
 use hardware::{
     change_piv_pin_native, is_cac_or_piv_atr, parse_pkcs15_tool_list,
-    query_native_pcsc_status, query_piv_pin_status, read_piv_certificates_native,
-    wait_for_smartcard_event, PyNativePcscStatus,
+    query_native_pcsc_status, query_piv_pin_status, read_piv_card_metadata_native,
+    read_piv_certificates_native, wait_for_smartcard_event, PyNativePcscStatus,
+    PyPivCardMetadata,
 };
 use integrity::{
     compute_file_sha256_rust, is_opensc_config_optimized_rust,
@@ -49,6 +50,11 @@ fn parse_certificate(
 #[pyfunction]
 fn read_card_certificates(reader: Option<String>) -> Vec<PyCardCertificate> {
     read_piv_certificates_native(reader.as_deref())
+}
+
+#[pyfunction]
+fn read_card_metadata(reader: Option<String>) -> PyPivCardMetadata {
+    read_piv_card_metadata_native(reader.as_deref())
 }
 
 #[pyfunction]
@@ -195,6 +201,7 @@ fn sentinel_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(parse_certificate, m)?)?;
     m.add_function(wrap_pyfunction!(read_card_certificates, m)?)?;
+    m.add_function(wrap_pyfunction!(read_card_metadata, m)?)?;
     m.add_function(wrap_pyfunction!(query_pin_status, m)?)?;
     m.add_function(wrap_pyfunction!(change_pin, m)?)?;
     m.add_function(wrap_pyfunction!(wait_for_card_event, m)?)?;
@@ -216,6 +223,7 @@ fn sentinel_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_ocsp_responder_cert_der, m)?)?;
     m.add_class::<PyCardCertificate>()?;
     m.add_class::<PyNativePcscStatus>()?;
+    m.add_class::<PyPivCardMetadata>()?;
     m.add_class::<PinBuffer>()?;
     Ok(())
 }

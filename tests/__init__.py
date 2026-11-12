@@ -1,1 +1,1 @@
-"""Unit test package for Sentinel CAC Manager."""
+"""Unit test package for Sentinel."""

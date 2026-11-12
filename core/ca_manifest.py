@@ -411,6 +411,7 @@ def get_certs_dir(override: Optional[str] = None) -> str:
         try:
             import pwd
             u_home = pwd.getpwnam(sudo_user).pw_dir
+            candidates.append(os.path.join(u_home, ".local", "share", "sentinel", "certificates"))
             candidates.append(os.path.join(u_home, ".local", "share", "sentinel_cac_manager", "certificates"))
         except Exception:
             pass

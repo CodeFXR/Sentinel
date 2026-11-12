@@ -47,6 +47,24 @@ class DiagnosticsView(Gtk.Box):
         self.setup_ui()
 
     def setup_ui(self):
+        # 0. Hardware & CCID Conflicts Group
+        conflict_group = Adw.PreferencesGroup()
+        conflict_group.set_title("Smart Card Hardware & CCID Diagnostics")
+        conflict_group.set_description("Inspect low-level reader access and daemon locks:")
+
+        self.scdaemon_row = Adw.ActionRow(title="GnuPG scdaemon Lock")
+        self.scdaemon_badge = Gtk.Label(label="Checking...")
+        self.scdaemon_badge.add_css_class("badge-info")
+        self.scdaemon_btn = Gtk.Button(label="Resolve Conflict")
+        self.scdaemon_btn.add_css_class("suggested-action")
+        self.scdaemon_btn.set_visible(False)
+        self.scdaemon_btn.connect("clicked", self.on_fix_scdaemon)
+        self.scdaemon_row.add_suffix(self.scdaemon_btn)
+        self.scdaemon_row.add_suffix(self.scdaemon_badge)
+        conflict_group.add(self.scdaemon_row)
+        self.container.append(conflict_group)
+        self.refresh_scdaemon_status()
+
         # 1. Portal Testing Group
         portal_group = Adw.PreferencesGroup()
         portal_group.set_title("DoD Portal Testing")

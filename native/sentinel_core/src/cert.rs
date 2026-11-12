@@ -23,6 +23,10 @@ pub struct PyCardCertificate {
     #[pyo3(get)]
     pub edipi: String,
     #[pyo3(get)]
+    pub upn: Option<String>,
+    #[pyo3(get)]
+    pub aia_url: Option<String>,
+    #[pyo3(get)]
     pub valid_from_str: String,
     #[pyo3(get)]
     pub valid_to_str: String,
@@ -153,6 +157,45 @@ pub fn parse_der_or_pem_bytes(
 
     let serial = x509.raw_serial_as_string();
 
+    // Extract SAN UPN (OID 1.3.6.1.4.1.311.20.2.3) and AIA CA-Issuer URL
+    let mut upn: Option<String> = None;
+    let mut aia_url: Option<String> = None;
+
+    for ext in x509.extensions() {
+        match ext.parsed_extension() {
+            ParsedExtension::SubjectAlternativeName(san) => {
+                for gn in &san.general_names {
+                    if let GeneralName::OtherName(oid, data) = gn {
+                        if oid.to_id_string() == "1.3.6.1.4.1.311.20.2.3" {
+                            if let Some(val) = extract_upn_from_other_name(data) {
+                                upn = Some(val);
+                            }
+                        }
+                    }
+                }
+            }
+            ParsedExtension::AuthorityInfoAccess(aia) => {
+                for desc in &aia.accessdescs {
+                    if desc.access_method == oid_registry::OID_PKIX_ACCESS_DESCRIPTOR_CA_ISSUERS {
+                        if let GeneralName::URI(uri) = desc.access_location {
+                            aia_url = Some(uri.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if edipi.is_empty() {
+        if let Some(ref u) = upn {
+            let re_upn_edipi = Regex::new(r"(\d{10})").unwrap();
+            if let Some(caps) = re_upn_edipi.captures(u) {
+                edipi = caps[1].to_string();
+            }
+        }
+    }
+
     Ok(PyCardCertificate {
         id,
         label,
@@ -162,6 +205,8 @@ pub fn parse_der_or_pem_bytes(
         cn,
         holder_name,
         edipi,
+        upn,
+        aia_url,
         valid_from_str,
         valid_to_str,
         serial,
@@ -170,6 +215,48 @@ pub fn parse_der_or_pem_bytes(
         status_text,
         raw_der: der_data,
     })
+}
+
+fn extract_upn_from_other_name(data: &[u8]) -> Option<String> {
+    if data.is_empty() {
+        return None;
+    }
+    let inner = if data[0] == 0xa0 && data.len() > 2 {
+        let len_byte = data[1] as usize;
+        if len_byte & 0x80 == 0 && data.len() >= 2 + len_byte {
+            &data[2..2 + len_byte]
+        } else if len_byte == 0x81 && data.len() > 3 {
+            let l = data[2] as usize;
+            &data[3..3 + l]
+        } else {
+            &data[2..]
+        }
+    } else {
+        data
+    };
+    if inner.len() > 2 && inner[0] == 0x0c {
+        let str_len = inner[1] as usize;
+        let start = 2;
+        let end = start + str_len;
+        if inner.len() >= end {
+            if let Ok(s) = std::str::from_utf8(&inner[start..end]) {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+    let printable: Vec<u8> = data.iter().copied().filter(|&b| (0x20..=0x7e).contains(&b)).collect();
+    if printable.contains(&b'@') {
+        if let Ok(s) = std::str::from_utf8(&printable) {
+            let s_trim = s.trim();
+            if s_trim.contains('@') {
+                return Some(s_trim.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn title_case(s: &str) -> String {
@@ -281,5 +368,16 @@ mod tests {
         let (holder, edipi) = format_dod_cn("BROWN.MARY.1122334455");
         assert_eq!(holder, "Mary Brown");
         assert_eq!(edipi, "1122334455");
+    }
+
+    #[test]
+    fn test_extract_upn_from_other_name() {
+        let upn_bytes = b"1234567890@mil";
+        let mut data = vec![0xa0, (upn_bytes.len() + 2) as u8, 0x0c, upn_bytes.len() as u8];
+        data.extend_from_slice(upn_bytes);
+        assert_eq!(extract_upn_from_other_name(&data), Some("1234567890@mil".to_string()));
+
+        assert_eq!(extract_upn_from_other_name(b"\x00\x01user@mil\x00"), Some("user@mil".to_string()));
+        assert_eq!(extract_upn_from_other_name(b"no-at-sign"), None);
     }
 }

@@ -27,14 +27,16 @@ from core.system_fix import (
 )
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel_cac_manager.png")
+ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel.png")
+if not os.path.isfile(ICON_PATH):
+    ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel_cac_manager.png")
 CSS_PATH = os.path.join(SCRIPT_DIR, "ui", "style.css")
 
 
 class InstallerWindow(Adw.Window):
     def __init__(self, app: Adw.Application):
         super().__init__(application=app)
-        self.set_title("Sentinel CAC Manager Setup")
+        self.set_title("Sentinel Setup")
         self.set_default_size(780, 620)
         self.set_modal(True)
 
@@ -74,7 +76,7 @@ class InstallerWindow(Adw.Window):
         self.header_bar.set_show_start_title_buttons(False)
 
         title_widget = Adw.WindowTitle(
-            title="Sentinel CAC Manager",
+            title="Sentinel",
             subtitle="Setup Wizard",
         )
         self.header_bar.set_title_widget(title_widget)
@@ -250,7 +252,7 @@ class InstallerWindow(Adw.Window):
         # Component 4: Desktop Launcher & CLI
         self.switch_desktop = Adw.SwitchRow(
             title="Application Menu Shortcut and CLI Tools",
-            subtitle="Installs Sentinel CAC Manager into your application menu and sets up ~/.local/bin/sentinel-cac-manager.",
+            subtitle="Installs Sentinel into your application menu and sets up ~/.local/bin/sentinel.",
         )
         self.switch_desktop.set_active(True)
         opts_group.add(self.switch_desktop)
@@ -304,7 +306,7 @@ class InstallerWindow(Adw.Window):
 
         # Progress Header
         prog_header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        self.prog_title = Gtk.Label(label="Configuring Sentinel CAC Manager...")
+        self.prog_title = Gtk.Label(label="Configuring Sentinel...")
         self.prog_title.add_css_class("hero-title")
         self.prog_title.set_xalign(0)
         prog_header.append(self.prog_title)
@@ -393,7 +395,7 @@ class InstallerWindow(Adw.Window):
         finish_text.append(f_title)
 
         f_sub = Gtk.Label(
-            label="Sentinel CAC Manager and DoD smart card authentication are now fully configured and active."
+            label="Sentinel and DoD smart card authentication are now fully configured and active."
         )
         f_sub.add_css_class("hero-subtitle")
         f_sub.set_xalign(0)
@@ -436,7 +438,7 @@ class InstallerWindow(Adw.Window):
 
         r4 = Adw.ActionRow(
             title="Application Shortcuts",
-            subtitle="Sentinel CAC Manager is available in your desktop application menu and command line.",
+            subtitle="Sentinel is available in your desktop application menu and command line.",
         )
         b4 = Gtk.Label(label="Installed")
         b4.add_css_class("badge-success")
@@ -453,7 +455,7 @@ class InstallerWindow(Adw.Window):
         # Checkbox & Finish Button
         bottom_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
 
-        self.launch_check = Gtk.CheckButton(label="Launch Sentinel CAC Manager now")
+        self.launch_check = Gtk.CheckButton(label="Launch Sentinel now")
         self.launch_check.add_css_class("launch-checkbox")
         self.launch_check.set_active(True)
         self.launch_check.set_hexpand(True)
@@ -669,7 +671,7 @@ class InstallerWindow(Adw.Window):
                 if self.platform.is_debian_derivative
                 else "/usr/lib64/opensc-pkcs11.so"
             )
-            run_privileged_helper(
+            ok_pol, _ = run_privileged_helper(
                 ["--policies", "--family", self.platform.family, "--module", mod_path],
                 log_fn=self._append_log,
                 timeout=30,
@@ -677,7 +679,12 @@ class InstallerWindow(Adw.Window):
             # User profile configurations
             b_res = configure_all_browsers(log_fn=self._append_log)
             self._append_log(f"[4/5] Browser configuration finished: {b_res}")
-            self._set_step_status("browsers", "success")
+            if ok_pol and b_res:
+                self._set_step_status("browsers", "success")
+            elif ok_pol or b_res:
+                self._set_step_status("browsers", "warning")
+            else:
+                self._set_step_status("browsers", "error")
         else:
             self._set_step_status("browsers", "skip")
 
@@ -715,15 +722,17 @@ class InstallerWindow(Adw.Window):
         launch_now = self.launch_check.get_active()
         self.close()
         if launch_now:
-            # Spawn sentinel_cac_manager main app in background
-            app_script = os.path.join(SCRIPT_DIR, "sentinel_cac_manager.py")
+            # Spawn sentinel main app in background
+            app_script = os.path.join(SCRIPT_DIR, "sentinel.py")
+            if not os.path.isfile(app_script):
+                app_script = os.path.join(SCRIPT_DIR, "sentinel_cac_manager.py")
             subprocess.Popen([sys.executable, app_script, "--gui"])
 
 
 class InstallerApplication(Adw.Application):
     def __init__(self):
         super().__init__(
-            application_id="com.codefxr.sentinel_cac_manager.installer",
+            application_id="com.codefxr.sentinel.installer",
             flags=0,
         )
 

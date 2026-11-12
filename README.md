@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="sentinel_cac_manager.png" alt="sentinel_icon" width="220" />
+  <img src="sentinel.png" alt="sentinel_icon" width="220" />
 
   <h1>Sentinel</h1>
 

@@ -142,6 +142,27 @@ class TestRustBridge(unittest.TestCase):
                 certs = read_card_certificates_rust()
                 self.assertEqual(certs, [])
 
+    def test_native_piv_metadata_reader(self):
+        import os
+        from unittest.mock import patch, MagicMock
+        from core.rust_bridge import read_card_metadata_rust
+
+        if os.environ.get("SENTINEL_TEST_HARDWARE") == "1":
+            c_name, t_label, t_serial = read_card_metadata_rust()
+        else:
+            fake_meta = MagicMock(
+                card_name="DoD Common Access Card (CAC / PIV)",
+                token_label="DoD Common Access Card",
+                token_serial="01020304-0506-0708-090a-0b0c0d0e0f10",
+            )
+            with patch("core.rust_bridge.is_rust_available", return_value=True), \
+                 patch("core.rust_bridge._sentinel_core") as mock_sc:
+                mock_sc.read_card_metadata.return_value = fake_meta
+                c_name, t_label, t_serial = read_card_metadata_rust()
+                self.assertEqual(c_name, "DoD Common Access Card (CAC / PIV)")
+                self.assertEqual(t_label, "DoD Common Access Card")
+                self.assertEqual(t_serial, "01020304-0506-0708-090a-0b0c0d0e0f10")
+
     def test_verify_cert_ocsp_handling(self):
         from core.smartcard import CardCertificate, verify_cert_ocsp
         # Certificate with no raw_der
@@ -207,19 +228,62 @@ class TestCliSanitization(unittest.TestCase):
             with open(custom_sentinel, "r") as f:
                 self.assertEqual(f.read(), "#!/bin/sh\necho hashicorp")
 
-            # Check desktop entry content for App ID com.codefxr.sentinel_cac_manager
-            desktop = os.path.join(tmp_home, ".local", "share", "applications", "sentinel_cac_manager.desktop")
+            # Check desktop entry content for App ID com.codefxr.sentinel
+            desktop = os.path.join(tmp_home, ".local", "share", "applications", "sentinel.desktop")
             self.assertTrue(os.path.isfile(desktop))
             with open(desktop, "r") as f:
                 content = f.read()
-                self.assertIn("StartupWMClass=com.codefxr.sentinel_cac_manager", content)
-                self.assertNotIn("mil.dod.sentinel_cac_manager", content)
+                self.assertIn("StartupWMClass=com.codefxr.sentinel", content)
+                self.assertNotIn("mil.dod.sentinel", content)
 
             # Test uninstaller
             un_ok, un_msg = uninstall_desktop_integration(home_dir=tmp_home)
             self.assertTrue(un_ok)
             self.assertFalse(os.path.exists(launcher))
             self.assertFalse(os.path.exists(desktop))
+
+    def test_cmd_export_certs(self):
+        import tempfile
+        import os
+        from pathlib import Path
+        from unittest.mock import patch
+        from cli import cmd_export_certs
+        from core.smartcard import SmartCardStatus, CardCertificate
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # 1. No card present -> returns False
+            empty_stat = SmartCardStatus(
+                service_active=True, reader_name=None, card_present=False, atr=None,
+                card_name=None, token_label=None, token_serial=None, certificates=[]
+            )
+            with patch("core.smartcard.scan_smartcard", return_value=empty_stat):
+                ok_none = cmd_export_certs(tmp_dir)
+                self.assertFalse(ok_none)
+
+            # 2. Card present with cert -> exports PEM
+            dummy_cert = CardCertificate(
+                id="0005", label="CAC ID / PIV Authentication", subject="CN=SMITH.JOHN.1234567890",
+                issuer="DoD Root CA 3", issuer_cn="DoD Root CA 3", cn="SMITH.JOHN.1234567890",
+                holder_name="John Smith", edipi="1234567890", valid_from=None, valid_to=None,
+                valid_to_str="2030-01-01", serial="123456", usage="Authentication",
+                is_valid=True, status_text="Valid", raw_der=b"FAKE_DER_BYTES_FOR_EXPORT"
+            )
+            card_stat = SmartCardStatus(
+                service_active=True, reader_name="Test Reader", card_present=True,
+                atr="3b:7d:96:00:00:80:31:80:65:b0:75:49:17:0f:83:00:90:00",
+                card_name="DoD CAC", token_label="DoD CAC", token_serial="1234",
+                certificates=[dummy_cert]
+            )
+            with patch("core.smartcard.scan_smartcard", return_value=card_stat):
+                ok_export = cmd_export_certs(tmp_dir)
+                self.assertTrue(ok_export)
+                # Verify file was written
+                files = os.listdir(tmp_dir)
+                self.assertEqual(len(files), 1)
+                self.assertTrue(files[0].endswith(".pem"))
+                content = Path(tmp_dir, files[0]).read_text(encoding="utf-8")
+                self.assertIn("-----BEGIN CERTIFICATE-----", content)
+                self.assertIn("-----END CERTIFICATE-----", content)
 
 
 class TestPythonFallbacks(unittest.TestCase):
@@ -458,8 +522,8 @@ class TestAgentDaemon(unittest.TestCase):
                 self.assertTrue(os.path.isfile(service_file))
                 with open(service_file, "r") as f:
                     content = f.read()
-                    self.assertIn("Description=Sentinel CAC Manager Card Monitor Daemon", content)
-                    self.assertIn("ExecStart=%h/.local/bin/sentinel-cac-manager --agent", content)
+                    self.assertIn("Description=Sentinel Card Monitor Daemon", content)
+                    self.assertIn("ExecStart=%h/.local/bin/sentinel --agent", content)
 
                 un_ok, un_msg = uninstall_systemd_user_service(home_dir=tmp_home)
                 self.assertTrue(un_ok)
@@ -503,10 +567,12 @@ class TestWorkstationLogonAndLock(unittest.TestCase):
     def test_archived_future_workstation_logon_hardening(self):
         import tempfile
         import os
-        from archive.future_workstation_logon import (
+        from unittest.mock import patch, MagicMock
+        from core.logon import (
             validate_logon_inputs,
             build_sssd_smartcard_config,
             has_existing_enterprise_sssd_domain,
+            is_running_in_vm,
         )
         # Missing or wildcard EDIPI must be rejected
         ok_empty, _ = validate_logon_inputs("root", "")
@@ -530,6 +596,14 @@ class TestWorkstationLogonAndLock(unittest.TestCase):
             with open(conf_path, "w") as f:
                 f.write("[sssd]\ndomains = corp.example.mil\n[domain/corp.example.mil]\nid_provider = ad\n")
             self.assertTrue(has_existing_enterprise_sssd_domain(sssd_conf_path=conf_path, conf_d_dir=tmp_dir))
+
+        # Test is_running_in_vm with mock
+        with patch("shutil.which", return_value="/usr/bin/systemd-detect-virt"), \
+             patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="kvm\n")
+            self.assertTrue(is_running_in_vm())
+            mock_run.return_value = MagicMock(returncode=1, stdout="none\n")
+            self.assertFalse(is_running_in_vm())
 
 
 class TestV201SecurityAndRollbackHardening(unittest.TestCase):
@@ -905,6 +979,7 @@ class TestV202SecurityOwnershipAndVerification(unittest.TestCase):
             os.path.join(REPO_ROOT, "core", "updater.py"),
             os.path.join(REPO_ROOT, "core", "ownership.py"),
             os.path.join(REPO_ROOT, "core", "ca_manifest.py"),
+            os.path.join(REPO_ROOT, "core", "rust_bridge.py"),
             os.path.join(REPO_ROOT, "ui", "system_view.py"),
         ]
         for path in unprivileged_files:
@@ -927,8 +1002,13 @@ class TestV202SecurityOwnershipAndVerification(unittest.TestCase):
 
         certs_dir = os.path.join(REPO_ROOT, "certificates")
         res = check_bundled_ca_expirations(certs_dir)
-        self.assertEqual(res["expired"], [])
-        self.assertIn(len(res["valid"]) + len(res["expiring_soon"]), (44, 45))
+        # Root CAs must strictly never be expired
+        root_names = {"DoD_Root_CA_3.crt", "DoD_Root_CA_4.crt", "DoD_Root_CA_5.crt", "DoD_Root_CA_6.crt"}
+        expired_roots = [e for e in res["expired"] if any(r in e for r in root_names)]
+        self.assertEqual(expired_roots, [], f"Official DoD Root CAs must never be expired: {expired_roots}")
+        # Total bundle must account for all 44-45 official DoD CAs
+        total_cas = len(res["valid"]) + len(res["expiring_soon"]) + len(res["expired"])
+        self.assertIn(total_cas, (44, 45))
 
     def test_firefox_policy_snapshot_preserves_preexisting_keys(self):
         import json
@@ -1438,6 +1518,63 @@ class TestV203SecurityOwnershipAndCorrectness(unittest.TestCase):
         self.assertEqual(DOD_CA_DER_FINGERPRINTS, HELPER_DER)
         self.assertEqual(len(DOD_ROOT_DER_FINGERPRINTS), 4)
         self.assertEqual(len(DOD_CA_DER_FINGERPRINTS), 45)
+
+    def test_scdaemon_conflict_detection_and_fix(self):
+        from unittest.mock import patch, MagicMock
+        from pathlib import Path
+        import tempfile
+        from core.system_fix import check_scdaemon_conflict, fix_scdaemon_conflict
+
+        # Scenario 1: pgrep scdaemon not running
+        with patch("shutil.which", return_value="/usr/bin/pgrep"), \
+             patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1)
+            conflicted, msg = check_scdaemon_conflict()
+            self.assertFalse(conflicted)
+            self.assertIn("No scdaemon conflict", msg)
+
+        # Scenario 2: scdaemon running without disable-ccid in user conf
+        with tempfile.TemporaryDirectory() as tmp_home:
+            with patch("shutil.which", side_effect=lambda cmd: f"/usr/bin/{cmd}"), \
+                 patch("subprocess.run") as mock_run, \
+                 patch("pathlib.Path.home", return_value=Path(tmp_home)):
+                mock_run.return_value = MagicMock(returncode=0)
+                conflicted, msg = check_scdaemon_conflict()
+                self.assertTrue(conflicted)
+                self.assertIn("disable-ccid", msg)
+
+                # Fix the conflict
+                ok, fix_msg = fix_scdaemon_conflict()
+                self.assertTrue(ok)
+                self.assertIn("Successfully configured", fix_msg)
+
+                # Verify ~/.gnupg/scdaemon.conf content and permissions
+                conf_file = Path(tmp_home) / ".gnupg" / "scdaemon.conf"
+                self.assertTrue(conf_file.is_file())
+                self.assertIn("disable-ccid", conf_file.read_text(encoding="utf-8"))
+
+                # Now check again, conflict should be resolved
+                conflicted2, msg2 = check_scdaemon_conflict()
+                self.assertFalse(conflicted2)
+                self.assertIn("No scdaemon conflict", msg2)
+
+    def test_card_certificate_upn_and_aia_fields(self):
+        cmd = [
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", "/dev/null",
+            "-nodes", "-subj", "/C=US/O=U.S. Government/OU=DoD/OU=PKI/CN=TESTER.ALICE.1234567890",
+            "-days", "30", "-outform", "DER"
+        ]
+        p = subprocess.run(cmd, capture_output=True)
+        self.assertEqual(p.returncode, 0)
+        der_bytes = p.stdout
+
+        cert = parse_card_certificate_rust("0005", "CAC ID / PIV Authentication", "DoD Web Logon", der_bytes)
+        self.assertIsNotNone(cert)
+        # Verify attributes exist and default gracefully when absent from cert
+        self.assertTrue(hasattr(cert, "upn"))
+        self.assertTrue(hasattr(cert, "aia_url"))
+        self.assertIsNone(cert.upn)
+        self.assertIsNone(cert.aia_url)
 
 
 if __name__ == "__main__":

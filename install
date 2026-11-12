@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Sentinel CAC Manager - DoD CAC Setup and Installer
-# Works on Ubuntu, Linux Mint, Pop!_OS, Zorin OS, Debian, and Fedora
+# Sentinel - DoD CAC Setup and Installer
+# Works on Ubuntu, Linux Mint, Pop!_OS, Zorin OS, Debian, Fedora, openSUSE & Arch
 # ==============================================================================
 set -euo pipefail
 
@@ -15,7 +15,7 @@ if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
     fi
 fi
 
-INSTALL_DIR="${TARGET_HOME}/.local/share/sentinel_cac_manager"
+INSTALL_DIR="${TARGET_HOME}/.local/share/sentinel"
 RELEASE_TAG="v2.0.3"
 REPO_URL="https://github.com/CodeFXR/Sentinel/releases/download/${RELEASE_TAG}/Sentinel-CAC-Manager.tar.gz"
 # Pinned SHA-256 for release archive; can be overridden via SENTINEL_ARCHIVE_SHA256
@@ -25,7 +25,7 @@ EXPECTED_ARCHIVE_SHA256="${SENTINEL_ARCHIVE_SHA256:-cd788e44603bd669468f5c82d334
 IS_LOCAL=0
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    if [ -f "${SCRIPT_DIR}/sentinel_cac_manager.py" ] && [ -d "${SCRIPT_DIR}/core" ]; then
+    if ([ -f "${SCRIPT_DIR}/sentinel.py" ] || [ -f "${SCRIPT_DIR}/sentinel_cac_manager.py" ]) && [ -d "${SCRIPT_DIR}/core" ]; then
         IS_LOCAL=1
     fi
 fi
@@ -38,7 +38,7 @@ fi
 
 # 2. Standalone web bootstrapper mode: fetch pinned release archive and verify SHA-256
 if [ "$IS_LOCAL" -eq 0 ]; then
-    echo "[*] Initializing Sentinel CAC Manager (${RELEASE_TAG}) installer..."
+    echo "[*] Initializing Sentinel (${RELEASE_TAG}) installer..."
     if [ -z "${EXPECTED_ARCHIVE_SHA256}" ]; then
         echo "[-] Error: Standalone remote bootstrap requires SENTINEL_ARCHIVE_SHA256 to verify release integrity." >&2
         echo "[-] Download the verified ${RELEASE_TAG} release archive and run ./install from the extracted directory," >&2
@@ -53,7 +53,7 @@ if [ "$IS_LOCAL" -eq 0 ]; then
     elif command -v wget >/dev/null 2>&1; then
         wget -qO "${TMP_ARCHIVE}" "${REPO_URL}"
     else
-        echo "[-] Error: curl or wget is required to download Sentinel CAC Manager." >&2
+        echo "[-] Error: curl or wget is required to download Sentinel." >&2
         exit 1
     fi
     ACTUAL_SHA256="$(sha256sum "${TMP_ARCHIVE}" | awk '{print $1}')"
@@ -218,7 +218,7 @@ install_system_deps_and_certs() {
 # 6. Handle uninstallation mode (--uninstall)
 if [ "${1:-}" = "--uninstall" ]; then
     echo "================================================================="
-    echo "   Sentinel CAC Manager - Uninstallation & Trust Rollback"
+    echo "   Sentinel - Uninstallation & Trust Rollback"
     echo "================================================================="
     if [ "$EUID" -ne 0 ]; then
         echo "[*] Reverting user-level browser configurations, systemd unit, and launchers..."
@@ -318,7 +318,7 @@ if [ "$NEEDS_ROOT" -eq 1 ]; then
         install_system_deps_and_certs
     else
         echo "================================================================="
-        echo "   Sentinel CAC Manager - System Dependency Setup"
+        echo "   Sentinel - System Dependency Setup"
         echo "================================================================="
         if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
             echo "[!] Missing required system packages:"
@@ -376,7 +376,7 @@ if [ "$WANT_GUI" -eq 1 ]; then
 fi
 
 echo "================================================================="
-echo "   Sentinel CAC Manager - Automated DoD CAC Installer"
+echo "   Sentinel - Automated DoD CAC Installer"
 echo "================================================================="
 echo "[+] Detected OS: ${PRETTY_NAME:-$ID} (Family: ${FAMILY})"
 
@@ -384,7 +384,10 @@ echo "[+] Detected OS: ${PRETTY_NAME:-$ID} (Family: ${FAMILY})"
 BIN_DIR="${TARGET_HOME}/.local/bin"
 APP_DIR="${TARGET_HOME}/.local/share/applications"
 ICON_DIR="${TARGET_HOME}/.local/share/icons/hicolor/256x256/apps"
-ICON_SRC="${SCRIPT_DIR}/sentinel_cac_manager.png"
+ICON_SRC="${SCRIPT_DIR}/sentinel.png"
+if [ ! -f "${ICON_SRC}" ]; then
+    ICON_SRC="${SCRIPT_DIR}/sentinel_cac_manager.png"
+fi
 
 if [[ "${SCRIPT_DIR}" =~ [$'\r\n'] ]] || [[ "${TARGET_HOME}" =~ [$'\r\n'] ]] || [[ "${ICON_DIR}" =~ [$'\r\n'] ]] || [[ "${BIN_DIR}" =~ [$'\r\n'] ]]; then
     echo "[-] Error: installation directory path contains carriage return or newline characters." >&2
@@ -395,30 +398,29 @@ mkdir -p "${BIN_DIR}" "${APP_DIR}" "${ICON_DIR}"
 
 # 10. Copy high-res icon to user icon theme
 if [ -f "${ICON_SRC}" ]; then
-    cp -f "${ICON_SRC}" "${ICON_DIR}/sentinel_cac_manager.png"
-    echo "[+] Installed app icon to ${ICON_DIR}/sentinel_cac_manager.png"
+    cp -f "${ICON_SRC}" "${ICON_DIR}/sentinel.png"
+    cp -f "${ICON_SRC}" "${ICON_DIR}/sentinel_cac_manager.png" 2>/dev/null || true
+    echo "[+] Installed app icon to ${ICON_DIR}/sentinel.png"
 fi
 
 # 11. Create launcher wrappers in ~/.local/bin
-printf '#!/usr/bin/env bash\nexec python3 %q "$@"\n' "${SCRIPT_DIR}/sentinel_cac_manager.py" > "${BIN_DIR}/sentinel-cac-manager"
-chmod +x "${BIN_DIR}/sentinel-cac-manager"
-
-# Safely manage sentinel symlink without clobbering third-party tools
-if [ -L "${BIN_DIR}/sentinel" ]; then
-    rm -f "${BIN_DIR}/sentinel"
-    ln -sf "${BIN_DIR}/sentinel-cac-manager" "${BIN_DIR}/sentinel"
-elif [ ! -e "${BIN_DIR}/sentinel" ]; then
-    ln -sf "${BIN_DIR}/sentinel-cac-manager" "${BIN_DIR}/sentinel"
+SCRIPT_ENTRY="${SCRIPT_DIR}/sentinel.py"
+if [ ! -f "${SCRIPT_ENTRY}" ]; then
+    SCRIPT_ENTRY="${SCRIPT_DIR}/sentinel_cac_manager.py"
 fi
+
+printf '#!/usr/bin/env bash\nexec python3 %q "$@"\n' "${SCRIPT_ENTRY}" > "${BIN_DIR}/sentinel"
+chmod +x "${BIN_DIR}/sentinel"
+
+# Maintain symlink for backwards compatibility
+ln -sf "${BIN_DIR}/sentinel" "${BIN_DIR}/sentinel-cac-manager"
 
 # Clean legacy developer symlinks
 rm -f "${BIN_DIR}/sentinel-v2" "${BIN_DIR}/sentinel2"
 
 echo "[+] Created executable commands:"
-echo "    - ${BIN_DIR}/sentinel-cac-manager"
-if [ -L "${BIN_DIR}/sentinel" ]; then
-    echo "    - ${BIN_DIR}/sentinel"
-fi
+echo "    - ${BIN_DIR}/sentinel"
+echo "    - ${BIN_DIR}/sentinel-cac-manager (compatibility link)"
 
 # 12. Install desktop launcher (FreeDesktop argument escaping applied)
 
@@ -437,13 +439,13 @@ escape_desktop_val() {
     printf '%s' "$str"
 }
 
-ESCAPED_SCRIPT=$(escape_desktop_exec_arg "${SCRIPT_DIR}/sentinel_cac_manager.py")
+ESCAPED_SCRIPT=$(escape_desktop_exec_arg "${SCRIPT_ENTRY}")
 ESCAPED_PATH=$(escape_desktop_val "${SCRIPT_DIR}")
-ESCAPED_ICON=$(escape_desktop_val "${ICON_DIR}/sentinel_cac_manager.png")
+ESCAPED_ICON=$(escape_desktop_val "${ICON_DIR}/sentinel.png")
 
-cat <<EOF > "${APP_DIR}/sentinel_cac_manager.desktop"
+cat <<EOF > "${APP_DIR}/sentinel.desktop"
 [Desktop Entry]
-Name=Sentinel CAC Manager
+Name=Sentinel
 GenericName=DoD Smart Card Manager
 Comment=Automate DoD CAC Middleware, Certificates, and Browser Authentication
 Exec=python3 ${ESCAPED_SCRIPT} --gui
@@ -454,34 +456,31 @@ Type=Application
 Categories=Utility;Security;
 Keywords=CAC;PIV;DoD;SmartCard;Military;Security;Authentication;
 StartupNotify=true
-StartupWMClass=com.codefxr.sentinel_cac_manager
+StartupWMClass=com.codefxr.sentinel
 EOF
-chmod +x "${APP_DIR}/sentinel_cac_manager.desktop"
-rm -f "${APP_DIR}/sentinel_v2.desktop"
+chmod +x "${APP_DIR}/sentinel.desktop"
+rm -f "${APP_DIR}/sentinel_cac_manager.desktop" "${APP_DIR}/sentinel_v2.desktop"
 update-desktop-database "${APP_DIR}" 2>/dev/null || true
-echo "[+] Installed desktop entry to ${APP_DIR}/sentinel_cac_manager.desktop"
+echo "[+] Installed desktop entry to ${APP_DIR}/sentinel.desktop"
 
 # 13. Optional Desktop folder shortcut
 DESKTOP_DIR="${TARGET_HOME}/Desktop"
 if [ -d "${DESKTOP_DIR}" ]; then
-    cp -f "${APP_DIR}/sentinel_cac_manager.desktop" "${DESKTOP_DIR}/sentinel_cac_manager.desktop"
-    chmod +x "${DESKTOP_DIR}/sentinel_cac_manager.desktop"
-    rm -f "${DESKTOP_DIR}/sentinel_v2.desktop"
-    gio set "${DESKTOP_DIR}/sentinel_cac_manager.desktop" metadata::trusted true 2>/dev/null || true
-    echo "[+] Placed desktop shortcut at ${DESKTOP_DIR}/sentinel_cac_manager.desktop"
+    cp -f "${APP_DIR}/sentinel.desktop" "${DESKTOP_DIR}/sentinel.desktop"
+    chmod +x "${DESKTOP_DIR}/sentinel.desktop"
+    rm -f "${DESKTOP_DIR}/sentinel_cac_manager.desktop" "${DESKTOP_DIR}/sentinel_v2.desktop"
+    gio set "${DESKTOP_DIR}/sentinel.desktop" metadata::trusted true 2>/dev/null || true
+    echo "[+] Placed desktop shortcut at ${DESKTOP_DIR}/sentinel.desktop"
 fi
 
 # Ensure user ownership if run under sudo
 if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
-    chown "${SUDO_USER}:" "${BIN_DIR}/sentinel-cac-manager" "${APP_DIR}/sentinel_cac_manager.desktop" 2>/dev/null || true
-    if [ -L "${BIN_DIR}/sentinel" ]; then
-        chown -h "${SUDO_USER}:" "${BIN_DIR}/sentinel" 2>/dev/null || true
+    chown "${SUDO_USER}:" "${BIN_DIR}/sentinel" "${BIN_DIR}/sentinel-cac-manager" "${APP_DIR}/sentinel.desktop" 2>/dev/null || true
+    if [ -f "${ICON_DIR}/sentinel.png" ]; then
+        chown "${SUDO_USER}:" "${ICON_DIR}/sentinel.png" 2>/dev/null || true
     fi
-    if [ -f "${ICON_DIR}/sentinel_cac_manager.png" ]; then
-        chown "${SUDO_USER}:" "${ICON_DIR}/sentinel_cac_manager.png" 2>/dev/null || true
-    fi
-    if [ -f "${DESKTOP_DIR}/sentinel_cac_manager.desktop" ]; then
-        chown "${SUDO_USER}:" "${DESKTOP_DIR}/sentinel_cac_manager.desktop" 2>/dev/null || true
+    if [ -f "${DESKTOP_DIR}/sentinel.desktop" ]; then
+        chown "${SUDO_USER}:" "${DESKTOP_DIR}/sentinel.desktop" 2>/dev/null || true
     fi
 fi
 
