@@ -25,7 +25,7 @@ EXPECTED_ARCHIVE_SHA256="${SENTINEL_ARCHIVE_SHA256:-cd788e44603bd669468f5c82d334
 IS_LOCAL=0
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    if ([ -f "${SCRIPT_DIR}/sentinel.py" ] || [ -f "${SCRIPT_DIR}/sentinel_cac_manager.py" ]) && [ -d "${SCRIPT_DIR}/core" ]; then
+    if [[ ( -f "${SCRIPT_DIR}/sentinel.py" || -f "${SCRIPT_DIR}/sentinel_cac_manager.py" ) && -d "${SCRIPT_DIR}/core" ]]; then
         IS_LOCAL=1
     fi
 fi

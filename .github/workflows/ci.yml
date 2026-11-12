@@ -1,4 +1,4 @@
-name: Sentinel CAC Manager CI
+name: Sentinel CI
 
 on:
   push:
