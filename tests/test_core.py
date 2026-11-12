@@ -567,7 +567,7 @@ class TestWorkstationLogonAndLock(unittest.TestCase):
     def test_archived_future_workstation_logon_hardening(self):
         import tempfile
         import os
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch, MagicMock, mock_open
         from core.logon import (
             validate_logon_inputs,
             build_sssd_smartcard_config,
@@ -603,7 +603,14 @@ class TestWorkstationLogonAndLock(unittest.TestCase):
             mock_run.return_value = MagicMock(returncode=0, stdout="kvm\n")
             self.assertTrue(is_running_in_vm())
             mock_run.return_value = MagicMock(returncode=1, stdout="none\n")
-            self.assertFalse(is_running_in_vm())
+            with patch("os.path.isfile", return_value=False):
+                self.assertFalse(is_running_in_vm())
+
+        # Test DMI fallback when systemd-detect-virt is absent
+        with patch("shutil.which", return_value=None), \
+             patch("os.path.isfile", return_value=True), \
+             patch("builtins.open", mock_open(read_data="QEMU Virtual Machine\n")):
+            self.assertTrue(is_running_in_vm())
 
 
 class TestV201SecurityAndRollbackHardening(unittest.TestCase):
