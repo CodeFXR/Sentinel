@@ -17,9 +17,9 @@ fi
 
 INSTALL_DIR="${TARGET_HOME}/.local/share/sentinel_cac_manager"
 RELEASE_TAG="v2.0.3"
-REPO_URL="https://github.com/CodeFXR/Sentinel-CAC-Manager/releases/download/${RELEASE_TAG}/Sentinel-CAC-Manager.tar.gz"
-# Optional override via SENTINEL_ARCHIVE_SHA256 for verified standalone web bootstrap
-EXPECTED_ARCHIVE_SHA256="${SENTINEL_ARCHIVE_SHA256:-}"
+REPO_URL="https://github.com/CodeFXR/Sentinel/releases/download/${RELEASE_TAG}/Sentinel-CAC-Manager.tar.gz"
+# Pinned SHA-256 for release archive; can be overridden via SENTINEL_ARCHIVE_SHA256
+EXPECTED_ARCHIVE_SHA256="${SENTINEL_ARCHIVE_SHA256:-cd788e44603bd669468f5c82d33417ae1f75324a48e01aa70b1a746cc8bdbbe3}"
 
 # 1. Determine if running inside a verified local checkout
 IS_LOCAL=0
@@ -180,10 +180,16 @@ install_system_deps_and_certs() {
     cp -f "${SCRIPT_DIR}/core/ca_manifest.py" /usr/libexec/sentinel/core/ca_manifest.py
     cp -f "${SCRIPT_DIR}/core/ownership.py" /usr/libexec/sentinel/core/ownership.py
     cp -f "${SCRIPT_DIR}/core/rust_bridge.py" /usr/libexec/sentinel/core/rust_bridge.py
-    touch /usr/libexec/sentinel/core/__init__.py
+    cp -f "${SCRIPT_DIR}/core/__init__.py" /usr/libexec/sentinel/core/__init__.py
+    if [ -f "${SCRIPT_DIR}/core/libsentinel_core.so" ]; then
+        cp -f "${SCRIPT_DIR}/core/libsentinel_core.so" /usr/libexec/sentinel/core/libsentinel_core.so
+    elif [ -f "${SCRIPT_DIR}/target/release/libsentinel_core.so" ]; then
+        cp -f "${SCRIPT_DIR}/target/release/libsentinel_core.so" /usr/libexec/sentinel/core/libsentinel_core.so
+    fi
     chown -R root:root /usr/libexec/sentinel
     chmod 0755 /usr/libexec/sentinel/privileged_helper.py
     chmod 0644 /usr/libexec/sentinel/core/*.py
+    [ -f /usr/libexec/sentinel/core/libsentinel_core.so ] && chmod 0755 /usr/libexec/sentinel/core/libsentinel_core.so
 
     # Deploy dedicated Polkit policy action if present
     if [ -f "${SCRIPT_DIR}/polkit/com.codefxr.sentinel.policy" ]; then
@@ -326,7 +332,19 @@ if [ "$NEEDS_ROOT" -eq 1 ]; then
     fi
 fi
 
-# 7. Determine run mode (GUI setup wizard by default)
+# 7. Optional: Build native Rust accelerator if Cargo is present
+if command -v cargo >/dev/null 2>&1 && [ -f "${SCRIPT_DIR}/Cargo.toml" ]; then
+    echo "[+] Rust toolchain detected. Compiling native accelerator module..."
+    if (cd "${SCRIPT_DIR}" && cargo build --release -q); then
+        if [ -f "${SCRIPT_DIR}/target/release/libsentinel_core.so" ]; then
+            cp -f "${SCRIPT_DIR}/target/release/libsentinel_core.so" "${SCRIPT_DIR}/core/libsentinel_core.so"
+        fi
+    else
+        echo "[!] Rust build skipped; falling back to pure-Python runtime."
+    fi
+fi
+
+# 8. Determine run mode (GUI setup wizard by default)
 WANT_GUI=1
 if [ "${1:-}" = "--cli" ] || [ "${1:-}" = "--status" ]; then
     WANT_GUI=0
@@ -361,12 +379,6 @@ echo "================================================================="
 echo "   Sentinel CAC Manager - Automated DoD CAC Installer"
 echo "================================================================="
 echo "[+] Detected OS: ${PRETTY_NAME:-$ID} (Family: ${FAMILY})"
-
-# 8. Optional: Build native Rust accelerator if Cargo is present
-if command -v cargo >/dev/null 2>&1 && [ -f "${SCRIPT_DIR}/Cargo.toml" ]; then
-    echo "[+] Rust toolchain detected. Compiling native accelerator module..."
-    (cd "${SCRIPT_DIR}" && cargo build --release -q) || echo "[!] Rust build skipped; falling back to pure-Python runtime."
-fi
 
 # 9. Validate paths and create local bin and application directories (CWE-74)
 BIN_DIR="${TARGET_HOME}/.local/bin"

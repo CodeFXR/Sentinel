@@ -1,7 +1,7 @@
 <div align="center">
-  <img src="sentinel_cac_manager.png" alt="sentinel_cac_manager_icon" width="220" />
+  <img src="sentinel_cac_manager.png" alt="sentinel_icon" width="220" />
 
-  <h1>Sentinel CAC Manager</h1>
+  <h1>Sentinel</h1>
 
   <p>
     <strong>Automated Common Access Card (CAC) identity, trust, and middleware manager for Linux.</strong>
@@ -15,23 +15,23 @@
   </p>
 
   <p>
-    <a href="#why-sentinel-cac-manager"><strong>Why Sentinel CAC Manager</strong></a> ·
+    <a href="#why-sentinel"><strong>Why Sentinel</strong></a> ·
     <a href="#installation"><strong>Installation</strong></a> ·
     <a href="#usage"><strong>Usage</strong></a> ·
     <a href="#troubleshooting"><strong>Troubleshooting</strong></a> ·
     <a href="#limitations"><strong>Limitations</strong></a> ·
-    <a href="https://github.com/CodeFXR/Sentinel-CAC-Manager/issues"><strong>Report Bug</strong></a>
+    <a href="https://github.com/CodeFXR/Sentinel/issues"><strong>Report Bug</strong></a>
   </p>
 </div>
 
 <br>
 <br>
 
-Configuring a Common Access Card on Linux usually requires orchestrating PC/SC daemons, compiling OpenSC drivers, modifying NSS security databases, installing root certificate stores across divergent distribution paths, and battling browser policy locks. One missed configuration step prevents mutual TLS authentication to military portals. Sentinel CAC Manager automates this entire pipeline into a single, verified workflow with an intuitive desktop interface and CLI.
+Configuring a Common Access Card on Linux usually requires orchestrating PC/SC daemons, compiling OpenSC drivers, modifying NSS security databases, installing root certificate stores across divergent distribution paths, and battling browser policy locks. One missed configuration step prevents mutual TLS authentication to military portals. Sentinel automates this entire pipeline into a single, verified workflow with an intuitive desktop interface and CLI.
 
 > **Disclaimer:** Unofficial open-source utility; not affiliated with, sponsored by, or endorsed by the U.S. Department of Defense (DoD) or the Defense Information Systems Agency (DISA).
 
-## Why Sentinel CAC Manager?
+## Why Sentinel?
 
 - **Cryptographic Trust Verification:** Every DoD certificate is verified against both a raw-file and canonical ASN.1 DER SHA-256 manifest, CA basic constraints, and validity window before installation.
 - **PKI Trust Anchor Separation:** Installs only the 4 self-signed DoD Root CAs into the OS root trust store, while importing intermediate CAs into browser NSS databases for chain building.
@@ -42,6 +42,14 @@ Configuring a Common Access Card on Linux usually requires orchestrating PC/SC d
 
 ## Installation
 
+### Quick Install (Recommended)
+
+Install Sentinel directly using the verified one-liner installer:
+
+```bash
+curl -fsSL https://snl.codefxr.com/install | bash
+```
+
 ### Requirements
 
 | Component | Minimum Version | Notes |
@@ -51,25 +59,31 @@ Configuring a Common Access Card on Linux usually requires orchestrating PC/SC d
 | PC/SC Daemon | 1.8+ | `pcscd` service and socket |
 | OpenSC | 0.20+ | PKCS#11 middleware provider |
 
-### Option 1: Release Archive (Recommended)
+### Manual Installation Options
 
-Download the pre-packaged offline release archive (`Sentinel-CAC-Manager.tar.gz`) and its SHA-256 checksum from [GitHub Releases](https://github.com/CodeFXR/Sentinel-CAC-Manager/releases):
+<details>
+<summary><strong>Option 1: Release Archive</strong></summary>
+
+Download the pre-packaged offline release archive (`Sentinel-CAC-Manager.tar.gz`) from [GitHub Releases](https://github.com/CodeFXR/Sentinel/releases):
 
 ```bash
-# Verify the archive SHA-256 against the digest published on the release page
-echo "<PUBLISHED_SHA256>  Sentinel-CAC-Manager.tar.gz" | sha256sum -c -
+# Verify the archive SHA-256 against the published release digest
+echo "cd788e44603bd669468f5c82d33417ae1f75324a48e01aa70b1a746cc8bdbbe3  Sentinel-CAC-Manager.tar.gz" | sha256sum -c -
 tar -xzf Sentinel-CAC-Manager.tar.gz
 cd Sentinel-CAC-Manager
 ./install
 ```
+</details>
 
-### Option 2: Clone from Repository
+<details>
+<summary><strong>Option 2: Clone from Repository</strong></summary>
 
 ```bash
-git clone --branch v2.0.3 https://github.com/CodeFXR/Sentinel-CAC-Manager.git
-cd Sentinel-CAC-Manager
+git clone --branch v2.0.3 https://github.com/CodeFXR/Sentinel.git
+cd Sentinel
 ./install
 ```
+</details>
 
 <details>
 <summary><strong>Unattended & Headless Installation</strong></summary>
@@ -77,15 +91,19 @@ cd Sentinel-CAC-Manager
 For server or automated container provisioning without graphical display:
 
 ```bash
-./install --cli
+curl -fsSL https://snl.codefxr.com/install | bash -s -- --cli
 ```
 
-If running `install` as a standalone bootstrap script outside a local checkout, export `SENTINEL_ARCHIVE_SHA256` with the release tarball's SHA-256 digest so the installer can verify archive authenticity before extracting.
+Or from a cloned repository checkout:
+
+```bash
+./install --cli
+```
 </details>
 
 ## Usage
 
-Sentinel CAC Manager provides both a Libadwaita desktop application and an unattended command-line interface.
+Sentinel provides both a Libadwaita desktop application and an unattended command-line interface.
 
 ### Command-Line Interface
 
