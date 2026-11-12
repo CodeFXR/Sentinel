@@ -71,9 +71,9 @@ jobs:
           echo "ADMIN_CUSTOM_NOTE" | sudo tee /usr/share/sentinel/admin_custom.txt >/dev/null
           echo '{"policies":{"Certificates":{"ImportEnterpriseRoots":true,"Install":["/etc/corp/root.pem"]}}}' | sudo tee /etc/firefox/policies/policies.json >/dev/null
 
-          sudo python3 core/privileged_helper.py --certs --family debian --certs-dir "$PWD/certificates"
-          sudo python3 -c "from core.privileged_helper import merge_firefox_policy_file; assert merge_firefox_policy_file('/etc/firefox/policies/policies.json', '/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so', '/usr/share/sentinel/certificates/DoD_Full_Chain.pem')"
-          sudo python3 core/privileged_helper.py --uninstall --family debian
+          sudo -E env "PATH=$PATH" "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}" python3 core/privileged_helper.py --certs --family debian --certs-dir "$PWD/certificates"
+          sudo -E env "PATH=$PATH" "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}" python3 -c "from core.privileged_helper import merge_firefox_policy_file; assert merge_firefox_policy_file('/etc/firefox/policies/policies.json', '/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so', '/usr/share/sentinel/certificates/DoD_Full_Chain.pem')"
+          sudo -E env "PATH=$PATH" "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}" python3 core/privileged_helper.py --uninstall --family debian
 
           grep -q "ADMIN_CANARY_CERT" /usr/local/share/ca-certificates/dod/DoD_Root_CA_3.crt
           grep -q "ADMIN_UNRELATED_CERT" /usr/local/share/ca-certificates/dod/Corp_Root_CA.crt
